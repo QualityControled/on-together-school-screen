@@ -7,7 +7,8 @@ Windows mod that plays shared YouTube videos on the whiteboard inside the school
 ## Features
 
 - Finds the school's `DrawingBoard` and displays a local Chromium-based Microsoft Edge WebView2 player on it.
-- Lets any player with the mod start a video, add videos to the shared queue, and play queued videos. The game host does not need the mod.
+- Lets any player with the mod add videos and start the queue when the board is idle. The game host does not need the mod.
+- Automatically plays the next queued video when the current video finishes, in queue order.
 - Sends playback and queue updates through the school's networked whiteboard RPC. It does not send synchronization text through chat.
 - Displays the playing video's title in the panel and resolves queue entries to video titles.
 - Lets modded players vote to skip; the vote passes at 30% of active modded players, rounded up with at least one yes vote. The game host can skip immediately if they have the mod.
@@ -23,11 +24,13 @@ Windows mod that plays shared YouTube videos on the whiteboard inside the school
 1. Close On-Together before replacing the mod files.
 2. Install BepInEx for On-Together and the Microsoft Edge WebView2 Runtime.
 3. Extract this package into `BepInEx/plugins/OnTogetherSchoolScreen/`, keeping `OnTogetherSchoolScreen.dll`, `SchoolScreenBrowser.exe`, `www`, and `runtimes` together. When updating, overwrite the existing mod files; do not install a second copy alongside them.
-4. Everyone who wants to watch together should install version 0.1.8 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Add from the Screen tab to play when the board is empty or to queue while a video is loaded. The Queue tab also lets anyone add a video or play a queued item.
+4. Everyone who wants to watch together should install version 0.1.9 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
 
 ## Host and queue moderation
 
-When the game host has the mod, they can skip immediately, remove queue entries, and block players from adding videos in the Access tab. When the host does not have the mod, modded players coordinate playback, queue updates, and skip votes among themselves. In that case there is no host-side block list, so modded players can add or play videos freely and may spam the queue.
+Videos play in queue order. Viewers can add videos, pause or resume playback, and vote to skip. They cannot choose a later queue entry, stop the board, or seek past a video.
+
+When the game host has the mod, they can skip immediately, choose a specific queued video, stop or seek playback, remove queue entries, and block players from adding videos in the Access tab. When the host does not have the mod, modded players coordinate automatic playback, queue updates, and skip votes among themselves. In that case there is no host-side block list; viewers still use queue order and skip voting.
 
 ## Volume behavior
 
@@ -37,7 +40,7 @@ The cutoff is based on distance from the board rather than the school's room bou
 
 ## Limits
 
-- Everyone watching together should use version 0.1.8. Older versions do not understand the current shared queue and playback packets.
+- Everyone watching together should use version 0.1.9. Older versions do not understand the updated queue and playback packets.
 - The mod and browser helper target Windows only. Each player needs WebView2 Runtime installed.
 - The local WebView2 player targets up to 30 board-image updates per second. Actual smoothness depends on game performance and WebView2 capture speed.
 - YouTube must allow the video to be embedded. Some private, age-restricted, or region-restricted videos may not play.

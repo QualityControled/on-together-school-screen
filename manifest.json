@@ -1,6 +1,6 @@
 {
   "name": "OnTogetherSchoolScreen",
-  "version_number": "0.1.8",
+  "version_number": "0.1.9",
   "website_url": "",
   "description": "Watch YouTube on the school whiteboard with hostless shared playback, queueing, skip voting, optional host controls, and local distance-based volume.",
   "dependencies": [

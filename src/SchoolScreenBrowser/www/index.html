@@ -12,11 +12,13 @@
 </head>
 <body>
   <div id="player"></div>
-  <div id="waiting">School screen · waiting for the host to share a video</div>
+  <div id="waiting">School screen · add a video in the F9 menu</div>
   <div id="titleLookup" aria-hidden="true"></div>
   <script>
     let player = null;
     let playerReady = false;
+    let activeVideoId = '';
+    let activeLoadId = 0;
     let titleLookupPlayer = null;
     let titleLookupReady = false;
     let activeTitleLookup = null;
@@ -33,9 +35,13 @@
 
     function applyCommand(command) {
       if (command.type === 'open') {
+        activeVideoId = command.id;
+        activeLoadId = command.loadId;
         waiting.style.display = 'none';
         player.loadVideoById({ videoId: command.id, startSeconds: command.time });
       } else if (command.type === 'clear') {
+        activeVideoId = '';
+        activeLoadId = 0;
         waiting.style.display = 'grid';
         if (player) player.stopVideo();
       } else if (command.type === 'play') {
@@ -49,9 +55,9 @@
       }
     }
 
-    window.schoolScreenCommand = function (type, value, time) {
+    window.schoolScreenCommand = function (type, value, time, loadId) {
       const command = type === 'open'
-        ? { type: type, id: value, time: Number(time) || 0 }
+        ? { type: type, id: value, time: Number(time) || 0, loadId: Number(loadId) || 0 }
         : type === 'volume'
           ? { type: type, volume: Math.max(0, Math.min(100, Number(value) || 0)) }
         : { type: type, time: Number(value) || 0 };
@@ -138,12 +144,13 @@
     };
 
     function sendState() {
-      if (!player || !player.getCurrentTime) return;
+      if (!player || !player.getCurrentTime || !activeVideoId) return;
       const time = Number(player.getCurrentTime()) || 0;
       const state = Number(player.getPlayerState());
       const videoData = player.getVideoData ? player.getVideoData() : null;
+      if (!videoData || videoData.video_id !== activeVideoId) return;
       const title = videoData && videoData.title ? String(videoData.title).replace(/[|\r\n]+/g, ' ').slice(0, 100) : '';
-      window.chrome.webview.postMessage('STATE|' + time.toFixed(1) + '|' + state + '|' + title);
+      window.chrome.webview.postMessage('STATE|' + time.toFixed(1) + '|' + state + '|' + title + '|' + activeVideoId + '|' + activeLoadId);
     }
     setInterval(sendState, 1000);
 

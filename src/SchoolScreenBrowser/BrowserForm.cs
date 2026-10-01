@@ -145,7 +145,7 @@ namespace SchoolScreenBrowser
             string type = parts[0];
             string script;
             if (type == "OPEN" && parts.Length >= 3)
-                script = "schoolScreenCommand('open'," + JsString(parts[1]) + "," + Number(parts[2]) + ");";
+                script = "schoolScreenCommand('open'," + JsString(parts[1]) + "," + Number(parts[2]) + "," + (parts.Length >= 4 ? Number(parts[3]) : "0") + ");";
             else if (type == "PLAY") script = "schoolScreenCommand('play');";
             else if (type == "PAUSE") script = "schoolScreenCommand('pause');";
             else if (type == "SEEK" && parts.Length >= 2) script = "schoolScreenCommand('seek'," + Number(parts[1]) + ");";

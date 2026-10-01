@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace OnTogetherSchoolScreen
 {
-    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.8")]
+    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.9")]
     public sealed class SchoolScreenPlugin : BaseUnityPlugin
     {
         private const float BoardCommandMarker = -2f;
@@ -37,6 +37,8 @@ namespace OnTogetherSchoolScreen
         private readonly Dictionary<int, float> _peerLastSeen = new Dictionary<int, float>();
         private readonly Dictionary<int, string> _peerPlayerKeys = new Dictionary<int, string>();
         private readonly HashSet<long> _processedQueueEvents = new HashSet<long>();
+        private readonly HashSet<long> _processedPlaybackEvents = new HashSet<long>();
+        private readonly PlaybackSession _playbackSession = new PlaybackSession();
         private readonly HashSet<string> _queueTitleLookups = new HashSet<string>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _queueTitleCache = new Dictionary<string, string>(StringComparer.Ordinal);
         private readonly List<QueueEntry> _videoQueue = new List<QueueEntry>();
@@ -105,6 +107,8 @@ namespace OnTogetherSchoolScreen
         private int _localPeerToken;
         private int _queueEventSequence;
         private int _playbackControllerToken;
+        private bool _queueStartRequested;
+        private float _nextQueueStartAt;
         private int _playerVolume;
         private Vector2 _queueScroll;
         private Vector2 _accessScroll;
@@ -191,6 +195,7 @@ namespace OnTogetherSchoolScreen
             FindSchoolBoard();
             PumpQueues();
             UpdateLobbyPresence();
+            UpdateQueuePlayback();
             if (Time.unscaledTime >= _nextVolumeUpdate)
             {
                 _nextVolumeUpdate = Time.unscaledTime + 0.25f;
@@ -320,7 +325,7 @@ namespace OnTogetherSchoolScreen
                 {
                     if (!string.IsNullOrEmpty(_videoId))
                     {
-                        SendHelper("OPEN\t" + _videoId + "\t" + _videoTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                        OpenBrowserVideo();
                         if (_playerState == 2) SendHelper("PAUSE");
                     }
                     UpdateLocalVolume(true);
@@ -333,8 +338,10 @@ namespace OnTogetherSchoolScreen
                 string[] fields = message.Split('|');
                 float seconds;
                 int state;
-                if (fields.Length >= 3 && float.TryParse(fields[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out seconds)
-                    && int.TryParse(fields[2], out state))
+                int loadId;
+                if (fields.Length >= 6 && float.TryParse(fields[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out seconds)
+                    && int.TryParse(fields[2], out state) && int.TryParse(fields[5], out loadId)
+                    && _playbackSession.Observe(fields[4], loadId, state))
                 {
                     _videoTime = seconds;
                     _playerState = state;
@@ -423,12 +430,16 @@ namespace OnTogetherSchoolScreen
             _videoTitle = "";
             _videoTime = 0f;
             _playerState = -1;
+            _playbackSession.Clear();
+            _queueStartRequested = false;
+            _nextQueueStartAt = 0f;
             _videoQueue.Clear();
             _skipVotes.Clear();
             _peerSkipVotes.Clear();
             _peerLastSeen.Clear();
             _peerPlayerKeys.Clear();
             _processedQueueEvents.Clear();
+            _processedPlaybackEvents.Clear();
             _moddedPlayers.Clear();
             _blockedQueuePlayers.Clear();
             _queueTitleLookups.Clear();
@@ -696,7 +707,7 @@ namespace OnTogetherSchoolScreen
             _url = GUI.TextField(inputRect, _url, _inputStyle);
             if (string.IsNullOrEmpty(_url)) GUI.Label(new Rect(inputRect.x + 10, inputRect.y + 8, inputRect.width - 20, 20), "Paste a YouTube link or video ID", _placeholderStyle);
 
-            bool boardHasVideo = !string.IsNullOrEmpty(_videoId);
+            bool boardHasVideo = !string.IsNullOrEmpty(_videoId) || _videoQueue.Count > 0;
             bool previousEnabled = GUI.enabled;
             GUI.enabled = _schoolBoard != null;
             if (GUI.Button(new Rect(20, 197, 416, 38), boardHasVideo ? "ADD TO QUEUE" : "PLAY ON THE BOARD", _primaryButtonStyle))
@@ -715,6 +726,7 @@ namespace OnTogetherSchoolScreen
             float controlWidth = (416 - 2 * gap) / 3;
             if (GUI.Button(new Rect(20, 262, controlWidth, 33), "Play", _controlButtonStyle)) Control("PLAY");
             if (GUI.Button(new Rect(20 + controlWidth + gap, 262, controlWidth, 33), "Pause", _controlButtonStyle)) Control("PAUSE");
+            GUI.enabled = _host && !string.IsNullOrEmpty(_videoId);
             if (GUI.Button(new Rect(20 + 2 * (controlWidth + gap), 262, controlWidth, 33), "Stop", _controlButtonStyle)) Control("CLEAR");
             if (GUI.Button(new Rect(20, 302, (416 - gap) / 2, 30), "−15 sec", _seekButtonStyle)) Seek(-15);
             if (GUI.Button(new Rect(20 + (416 + gap) / 2, 302, (416 - gap) / 2, 30), "+15 sec", _seekButtonStyle)) Seek(15);
@@ -763,7 +775,11 @@ namespace OnTogetherSchoolScreen
                     if (GUI.Button(new Rect(20, 219, 196, 34), voteLabel, _controlButtonStyle)) ToggleSkipVote();
                 }
             }
-            else GUI.Label(new Rect(20, 219, 416, 34), "Play a video before voting to skip.", _hintStyle);
+            else if (_videoQueue.Count > 0)
+            {
+                if (GUI.Button(new Rect(20, 219, 196, 34), "PLAY NEXT", _primaryButtonStyle)) RequestQueueStart();
+            }
+            else GUI.Label(new Rect(20, 219, 416, 34), "Add a video to start watching.", _hintStyle);
 
             GUI.DrawTexture(new Rect(18, 262, 420, 1), _badgeTexture);
             Rect viewRect = new Rect(20, 271, 416, 178);
@@ -774,15 +790,15 @@ namespace OnTogetherSchoolScreen
                 QueueEntry item = _videoQueue[i];
                 float y = i * 38f;
                 string title = string.IsNullOrWhiteSpace(item.Title) ? item.VideoId : item.Title;
-                GUI.Label(new Rect(2, y + 6, _host ? 220 : 296, 24), (i + 1) + ".  " + ShortTitle(title, _host ? 26 : 38), _statusStyle);
-                if (GUI.Button(new Rect(_host ? 229 : 304, y + 2, 88, 30), "PLAY", _controlButtonStyle)) PlayQueuedVideo(i);
+                GUI.Label(new Rect(2, y + 6, _host ? 220 : 391, 24), (i + 1) + ".  " + ShortTitle(title, _host ? 26 : 52), _statusStyle);
                 if (_host)
                 {
+                    if (GUI.Button(new Rect(229, y + 2, 88, 30), "PLAY", _controlButtonStyle)) PlayQueuedVideo(i);
                     if (GUI.Button(new Rect(323, y + 2, 68, 30), "REMOVE", _seekButtonStyle)) RemoveQueuedVideo(i);
                 }
             }
             GUI.EndScrollView();
-            GUI.Label(new Rect(20, 451, 416, 16), _host ? "You can skip any time or play a queued video." : "Modded players can play queued videos and vote to skip.", _hintStyle);
+            GUI.Label(new Rect(20, 451, 416, 16), _host ? "You can skip any time or play a queued video." : "Videos play in order. Vote to skip the current video.", _hintStyle);
         }
 
         private void DrawAccessTab()
@@ -931,15 +947,14 @@ namespace OnTogetherSchoolScreen
                 _status = "The school whiteboard is not ready yet.";
                 return;
             }
-            SendBoardCommand("OPEN", id, 0f, 1);
-            BroadcastVoteStatus();
-            _url = "";
+            AddVideoToQueue();
         }
 
         private void Control(string command)
         {
             if (command == "CLEAR")
             {
+                if (!_host) return;
                 _skipVotes.Clear();
                 _localVotedSkip = false;
                 SendBoardCommand("CLEAR");
@@ -951,6 +966,7 @@ namespace OnTogetherSchoolScreen
 
         private void Seek(float amount)
         {
+            if (!_host) return;
             SendBoardCommand("SEEK", null, Mathf.Max(0, _videoTime + amount));
         }
 
@@ -968,8 +984,7 @@ namespace OnTogetherSchoolScreen
                 _queueStatus = "The school whiteboard is not ready yet.";
                 return;
             }
-            int sequence = (_queueEventSequence + 1) & QueueEventSequenceMask;
-            _queueEventSequence = sequence;
+            int sequence = NextQueueEventSequence();
             int encodedOperation = (sequence << 4) | 10;
             Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation);
             Vector2 previous = new Vector2(PackVideoIdGroup(id, 0, 4), PackVideoIdGroup(id, 4, 4));
@@ -990,12 +1005,46 @@ namespace OnTogetherSchoolScreen
 
             bool vote = !_localVotedSkip;
             SendPeerPacket(vote ? 12 : 13, (vote ? "VOTE|" : "UNVOTE|") + _localPeerToken);
-            _localVotedSkip = vote;
         }
 
         private void SkipCurrentVideo()
         {
-            if ((!_host && _localPeerToken != GetLowestActivePeerToken()) || string.IsNullOrEmpty(_videoId)) return;
+            if ((!_host && !IsLocalPlaybackCoordinator()) || string.IsNullOrEmpty(_videoId)) return;
+            AdvanceQueue();
+        }
+
+        private bool IsLocalPlaybackCoordinator()
+        {
+            int coordinator = _playbackControllerToken != 0 ? _playbackControllerToken : GetLowestActivePeerToken();
+            return coordinator == _localPeerToken;
+        }
+
+        private void UpdateQueuePlayback()
+        {
+            if (_schoolBoard == null) return;
+            if (string.IsNullOrEmpty(_videoId) && Time.unscaledTime < _nextQueueStartAt) return;
+            if (_playbackSession.ShouldAdvance(IsLocalPlaybackCoordinator(), _queueStartRequested, _videoQueue.Count > 0))
+                AdvanceQueue();
+        }
+
+        private void RequestQueueStart()
+        {
+            if (!string.IsNullOrEmpty(_videoId) || _videoQueue.Count == 0) return;
+            SendPeerPacket(0, "QUEUE_START|" + _localPeerToken);
+        }
+
+        private void ScheduleQueueStart()
+        {
+            if (!string.IsNullOrEmpty(_videoId)) return;
+            _queueStartRequested = true;
+            // Give peer presence and a current-video sync time to arrive before electing an idle controller.
+            _nextQueueStartAt = Time.unscaledTime + 0.75f;
+        }
+
+        private void AdvanceQueue()
+        {
+            if (!_host && !IsLocalPlaybackCoordinator()) return;
+            _queueStartRequested = false;
             _skipVotes.Clear();
             _localVotedSkip = false;
             if (_videoQueue.Count > 0)
@@ -1011,25 +1060,19 @@ namespace OnTogetherSchoolScreen
 
         private void PlayQueuedVideo(int index)
         {
-            if (index < 0 || index >= _videoQueue.Count || _schoolBoard == null) return;
+            if (!_host || index < 0 || index >= _videoQueue.Count || _schoolBoard == null) return;
             QueueEntry selected = _videoQueue[index];
-            int encodedOperation = (index << 5) | 15;
-            Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation);
-            Vector2 previous = new Vector2(PackVideoIdGroup(selected.VideoId, 0, 4), PackVideoIdGroup(selected.VideoId, 4, 4));
-            try { _schoolBoard.FillTheBlanksRPC(uv, previous, PackVideoIdGroup(selected.VideoId, 8, 3), false, false); }
-            catch (Exception ex) { Logger.LogWarning("Could not play queued video: " + ex.GetBaseException().Message); }
-            HandleNetworkCommand("QUEUE_PLAY|" + _localPeerToken + "|" + index + "|" + selected.VideoId);
+            _videoQueue.RemoveAt(index);
+            BroadcastQueueSnapshot();
+            SendBoardCommand("OPEN", selected.VideoId, 0f, 1);
             _activeTab = 0;
         }
 
         private void RemoveQueuedVideo(int index)
         {
             if (!_host || index < 0 || index >= _videoQueue.Count) return;
-            QueueEntry selected = _videoQueue[index];
-            Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), (index << 5) | 16 | 15);
-            try { _schoolBoard.FillTheBlanksRPC(uv, Vector2.zero, 0, false, false); }
-            catch (Exception ex) { Logger.LogWarning("Could not remove queued video: " + ex.GetBaseException().Message); }
-            HandleNetworkCommand("QUEUE_REMOVE|" + _localPeerToken + "|" + index + "|" + selected.VideoId);
+            _videoQueue.RemoveAt(index);
+            BroadcastQueueSnapshot();
         }
 
         private void ProcessLobbyRequest(string playerKey, string payload)
@@ -1072,6 +1115,7 @@ namespace OnTogetherSchoolScreen
                 _queueTitleCache.TryGetValue(id, out title);
                 _videoQueue.Add(new QueueEntry { VideoId = id, Title = string.IsNullOrWhiteSpace(title) ? id : title, AddedBy = playerName });
                 RequestQueueTitle(id);
+                ScheduleQueueStart();
                 BroadcastQueueSnapshot();
                 if (newPlayer) BroadcastVoteStatus();
                 return;
@@ -1083,7 +1127,7 @@ namespace OnTogetherSchoolScreen
                 if (command == "VOTE") _skipVotes.Add(playerKey);
                 else _skipVotes.Remove(playerKey);
                 BroadcastVoteStatus();
-                if (_skipVotes.Count >= GetRequiredVotes()) SkipCurrentVideo();
+                if (_skipVotes.Count >= GetRequiredVotes() && IsLocalPlaybackCoordinator()) SkipCurrentVideo();
             }
         }
 
@@ -1114,7 +1158,7 @@ namespace OnTogetherSchoolScreen
         private void BroadcastQueueSnapshot()
         {
             if (_schoolBoard == null) return;
-            SendBoardPayload(new Vector2(BoardCommandMarker, 7f), Vector2.zero, 0);
+            SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 7f), Vector2.zero, 0);
             for (int i = 0; i < _videoQueue.Count; i++)
             {
                 string id = _videoQueue[i].VideoId;
@@ -1122,7 +1166,7 @@ namespace OnTogetherSchoolScreen
                 int second = PackVideoIdGroup(id, 4, 4);
                 int third = PackVideoIdGroup(id, 8, 3);
                 int encodedOperation = (i << 4) | 8;
-                SendBoardPayload(new Vector2(BoardCommandMarker, encodedOperation), new Vector2(first, second), third);
+                SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation), new Vector2(first, second), third);
             }
         }
 
@@ -1183,12 +1227,32 @@ namespace OnTogetherSchoolScreen
             catch (Exception ex) { _status = "Browser command failed: " + ex.Message; }
         }
 
+        private void OpenBrowserVideo()
+        {
+            int loadId = _playbackSession.Begin(_videoId);
+            SendHelper("OPEN\t" + _videoId + "\t" + _videoTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "\t" + loadId);
+        }
+
+        private int NextQueueEventSequence()
+        {
+            _queueEventSequence = (_queueEventSequence + 1) & QueueEventSequenceMask;
+            if (_queueEventSequence == 0) _queueEventSequence = 1;
+            return _queueEventSequence;
+        }
+
+        private bool AcceptPlaybackEvent(int peerToken, int sequence)
+        {
+            if (peerToken <= 0 || peerToken > PeerTokenMask || sequence <= 0 || sequence > QueueEventSequenceMask) return false;
+            return _processedPlaybackEvents.Add(((long)peerToken << 20) | (uint)sequence);
+        }
+
         private void SendBoardCommand(string command, string videoId = null, float seconds = 0f, int state = 1)
         {
             if (_schoolBoard == null) return;
 
             int operation;
             int encodedOperation;
+            int sequence = 0;
             int firstGroup = 0;
             int secondGroup = 0;
             int thirdGroup = 0;
@@ -1197,6 +1261,7 @@ namespace OnTogetherSchoolScreen
             {
                 case "OPEN":
                     if (!IsVideoId(videoId)) return;
+                    sequence = NextQueueEventSequence();
                     operation = 1;
                     firstGroup = PackVideoIdGroup(videoId, 0, 4);
                     secondGroup = PackVideoIdGroup(videoId, 4, 4);
@@ -1209,7 +1274,7 @@ namespace OnTogetherSchoolScreen
                     operation = 4;
                     thirdGroup = Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(0f, seconds) * 10f), 0, 16777215);
                     break;
-                case "CLEAR": operation = 5; break;
+                case "CLEAR": operation = 5; sequence = NextQueueEventSequence(); break;
                 case "SYNC":
                     if (!IsVideoId(videoId)) return;
                     operation = 6;
@@ -1223,17 +1288,17 @@ namespace OnTogetherSchoolScreen
                 default: return;
             }
 
-            encodedOperation = operation;
+            encodedOperation = (sequence << 4) | operation;
             if (command != "SEEK" && command != "OPEN") thirdGroup = 0;
 
         Send:
             Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation);
             string localCommand;
-            if (operation == 1) localCommand = "OPEN|" + videoId + "|0|" + _localPeerToken;
+            if (operation == 1) localCommand = "OPEN|" + videoId + "|0|" + _localPeerToken + "|" + sequence;
             else if (operation == 2) localCommand = "PLAY|" + _localPeerToken;
             else if (operation == 3) localCommand = "PAUSE|" + _localPeerToken;
             else if (operation == 4) localCommand = "SEEK|" + (thirdGroup / 10f).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + _localPeerToken;
-            else if (operation == 5) localCommand = "CLEAR|" + _localPeerToken;
+            else if (operation == 5) localCommand = "CLEAR|" + _localPeerToken + "|" + sequence;
             else localCommand = "SYNC|" + videoId + "|" + ((encodedOperation >> 4) / 10f).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + ((encodedOperation & 8) != 0 ? "2" : "1") + "|" + _localPeerToken;
 
             HandleNetworkCommand(localCommand);
@@ -1246,38 +1311,53 @@ namespace OnTogetherSchoolScreen
             string[] fields = message.Split('|');
             if (fields.Length == 0) return;
             string command = fields[0];
-            if (command == "OPEN" && fields.Length >= 3)
+            if (command == "QUEUE_PLAY" || command == "QUEUE_REMOVE") return; // Retired unrestricted entry actions.
+            if (command == "OPEN" && fields.Length >= 5)
             {
+                int peerToken, sequence;
+                if (!IsVideoId(fields[1]) || !int.TryParse(fields[3], out peerToken)
+                    || !int.TryParse(fields[4], out sequence) || !AcceptPlaybackEvent(peerToken, sequence)) return;
+                _peerLastSeen[peerToken] = Time.unscaledTime;
                 _videoId = fields[1];
                 _videoTitle = "";
                 _videoTime = ParseFloat(fields[2]);
                 _playerState = 1;
-                if (fields.Length >= 4) int.TryParse(fields[3], out _playbackControllerToken);
+                _playbackControllerToken = peerToken;
+                _queueStartRequested = false;
+                _nextSync = Time.unscaledTime + 10f;
                 _localVotedSkip = false;
                 _peerSkipVotes.Clear();
                 _skipVotes.Clear();
-                SendHelper("OPEN\t" + _videoId + "\t" + _videoTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                OpenBrowserVideo();
                 UpdateLocalVolume(true);
                 BroadcastVoteStatus();
             }
             else if (command == "PLAY" || command == "PAUSE")
             {
+                if (command == "PLAY") _playbackSession.Resume();
                 _playerState = command == "PLAY" ? 1 : 2;
                 if (fields.Length >= 2) int.TryParse(fields[1], out _playbackControllerToken);
                 SendHelper(command);
             }
             else if (command == "SEEK" && fields.Length >= 2)
             {
+                _playbackSession.Resume();
                 _videoTime = ParseFloat(fields[1]);
                 if (fields.Length >= 3) int.TryParse(fields[2], out _playbackControllerToken);
                 SendHelper("SEEK\t" + _videoTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
             }
-            else if (command == "CLEAR")
+            else if (command == "CLEAR" && fields.Length >= 3)
             {
+                int peerToken, sequence;
+                if (!int.TryParse(fields[1], out peerToken) || !int.TryParse(fields[2], out sequence)
+                    || !AcceptPlaybackEvent(peerToken, sequence)) return;
                 _videoId = "";
                 _videoTitle = "";
                 _playerState = -1;
+                _videoTime = 0f;
                 _playbackControllerToken = 0;
+                _queueStartRequested = false;
+                _playbackSession.Clear();
                 _localVotedSkip = false;
                 _peerSkipVotes.Clear();
                 _skipVotes.Clear();
@@ -1302,10 +1382,16 @@ namespace OnTogetherSchoolScreen
                     _videoId = id;
                     _videoTitle = "";
                     _localVotedSkip = false;
-                    SendHelper("OPEN\t" + id + "\t" + synchronizedTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                    _videoTime = synchronizedTime;
+                    _queueStartRequested = false;
+                    OpenBrowserVideo();
                 }
-                else if (Math.Abs(localTime - synchronizedTime) > 1.5f)
+                else if (Math.Abs(localTime - synchronizedTime) > 1.5f || _playbackSession.HasEnded)
+                {
+                    _playbackSession.Resume();
+                    _videoTime = synchronizedTime;
                     SendHelper("SEEK\t" + synchronizedTime.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                }
                 if (synchronizedState == 2 && localState != 2) SendHelper("PAUSE");
                 else if (synchronizedState == 1 && localState != 1) SendHelper("PLAY");
                 UpdateLocalVolume(true);
@@ -1314,6 +1400,13 @@ namespace OnTogetherSchoolScreen
             {
                 int peerToken;
                 if (int.TryParse(fields[1], out peerToken)) HandlePeerPresence(peerToken);
+            }
+            else if (command == "QUEUE_START" && fields.Length >= 2)
+            {
+                int peerToken;
+                if (!int.TryParse(fields[1], out peerToken) || peerToken <= 0 || peerToken > PeerTokenMask) return;
+                _peerLastSeen[peerToken] = Time.unscaledTime;
+                if (_videoQueue.Count > 0) ScheduleQueueStart();
             }
             else if ((command == "VOTE" || command == "UNVOTE") && fields.Length >= 2)
             {
@@ -1326,23 +1419,18 @@ namespace OnTogetherSchoolScreen
                 if (int.TryParse(fields[1], out peerToken) && int.TryParse(fields[2], out sequence))
                     ApplyQueueAdd(peerToken, sequence, fields[3]);
             }
-            else if (command == "QUEUE_PLAY" && fields.Length >= 4)
+            else if (command == "QUEUE_CLEAR")
             {
-                int peerToken, index;
-                if (int.TryParse(fields[1], out peerToken) && int.TryParse(fields[2], out index))
-                    ApplyQueuePlay(peerToken, index, fields[3]);
+                int peerToken;
+                if (fields.Length >= 2 && int.TryParse(fields[1], out peerToken) && peerToken == _localPeerToken) return;
+                _videoQueue.Clear();
             }
-            else if (command == "QUEUE_REMOVE" && fields.Length >= 4)
-            {
-                int peerToken, index;
-                if (int.TryParse(fields[1], out peerToken) && int.TryParse(fields[2], out index))
-                    ApplyQueueRemove(peerToken, index, fields[3]);
-            }
-            else if (command == "QUEUE_CLEAR") _videoQueue.Clear();
             else if (command == "QUEUE_ITEM" && fields.Length >= 3)
             {
                 int index;
                 if (!int.TryParse(fields[1], out index) || index < 0 || !IsVideoId(fields[2])) return;
+                int peerToken;
+                if (fields.Length >= 4 && int.TryParse(fields[3], out peerToken) && peerToken == _localPeerToken) return;
                 string title;
                 _queueTitleCache.TryGetValue(fields[2], out title);
                 QueueEntry item = new QueueEntry { VideoId = fields[2], Title = string.IsNullOrWhiteSpace(title) ? fields[2] : title, AddedBy = "" };
@@ -1364,6 +1452,9 @@ namespace OnTogetherSchoolScreen
             bool isNewPeer = !_peerLastSeen.ContainsKey(peerToken);
             int previousCoordinator = GetLowestActivePeerToken();
             _peerLastSeen[peerToken] = Time.unscaledTime;
+            if (isNewPeer && peerToken != _localPeerToken && _playbackControllerToken == _localPeerToken
+                && !string.IsNullOrEmpty(_videoId) && !_playbackSession.HasEnded)
+                SendBoardCommand("SYNC", _videoId, _videoTime, _playerState);
             if (isNewPeer && peerToken != _localPeerToken && !_host && _localPeerToken == previousCoordinator && _videoQueue.Count > 0)
                 BroadcastQueueSnapshot();
             BroadcastVoteStatus();
@@ -1377,7 +1468,7 @@ namespace OnTogetherSchoolScreen
             else _peerSkipVotes.Remove(peerToken);
             if (peerToken == _localPeerToken) _localVotedSkip = vote;
             BroadcastVoteStatus();
-            if (_peerSkipVotes.Count >= GetRequiredVotes() && (_host || _localPeerToken == GetLowestActivePeerToken()))
+            if (_peerSkipVotes.Count >= GetRequiredVotes() && IsLocalPlaybackCoordinator())
                 SkipCurrentVideo();
         }
 
@@ -1404,39 +1495,7 @@ namespace OnTogetherSchoolScreen
             _queueTitleCache.TryGetValue(videoId, out title);
             _videoQueue.Add(new QueueEntry { VideoId = videoId, Title = string.IsNullOrWhiteSpace(title) ? videoId : title, AddedBy = "" });
             RequestQueueTitle(videoId);
-            if (_host) BroadcastQueueSnapshot();
-        }
-
-        private void ApplyQueuePlay(int peerToken, int index, string videoId)
-        {
-            if (!IsVideoId(videoId)) return;
-            _peerLastSeen[peerToken] = Time.unscaledTime;
-            if (index >= 0 && index < _videoQueue.Count && _videoQueue[index].VideoId == videoId)
-                _videoQueue.RemoveAt(index);
-            else
-            {
-                int found = _videoQueue.FindIndex(item => item.VideoId == videoId);
-                if (found >= 0) _videoQueue.RemoveAt(found);
-            }
-            HandleNetworkCommand("OPEN|" + videoId + "|0|" + peerToken);
-            if (_host) BroadcastQueueSnapshot();
-        }
-
-        private void ApplyQueueRemove(int peerToken, int index, string videoId)
-        {
-            if (!IsVideoId(videoId)) return;
-            if (_host && peerToken != _localPeerToken)
-            {
-                BroadcastQueueSnapshot();
-                return;
-            }
-            if (index >= 0 && index < _videoQueue.Count && _videoQueue[index].VideoId == videoId)
-                _videoQueue.RemoveAt(index);
-            else
-            {
-                int found = _videoQueue.FindIndex(item => item.VideoId == videoId);
-                if (found >= 0) _videoQueue.RemoveAt(found);
-            }
+            ScheduleQueueStart();
             if (_host) BroadcastQueueSnapshot();
         }
 
@@ -1485,19 +1544,26 @@ namespace OnTogetherSchoolScreen
             if (!TryDecodeBoardMarker(uv.x, out peerToken)) return true;
             SchoolScreenPlugin plugin = _instance;
             if (plugin == null) return false;
+            // Local actions are applied explicitly. A relayed echo must not affect a later video.
+            if (peerToken == plugin._localPeerToken) return false;
 
             int encodedOperation = Mathf.RoundToInt(uv.y);
             int packetType = encodedOperation & 15;
+            if (packetType == 0)
+            {
+                plugin._networkQueue.Enqueue("QUEUE_START|" + peerToken);
+                return false;
+            }
             if (packetType == 7)
             {
-                plugin._networkQueue.Enqueue("QUEUE_CLEAR");
+                plugin._networkQueue.Enqueue("QUEUE_CLEAR|" + peerToken);
                 return false;
             }
             if (packetType == 8)
             {
                 int index = encodedOperation >> 4;
                 string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex);
-                if (id != null) plugin._networkQueue.Enqueue("QUEUE_ITEM|" + index + "|" + id);
+                if (id != null) plugin._networkQueue.Enqueue("QUEUE_ITEM|" + index + "|" + id + "|" + peerToken);
                 return false;
             }
             if (packetType == 9)
@@ -1524,13 +1590,7 @@ namespace OnTogetherSchoolScreen
             }
             if (packetType == 15)
             {
-                int index = encodedOperation >> 5;
-                string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex);
-                if (id != null)
-                {
-                    string action = (encodedOperation & 16) != 0 ? "QUEUE_REMOVE|" : "QUEUE_PLAY|";
-                    plugin._networkQueue.Enqueue(action + peerToken + "|" + index + "|" + id);
-                }
+                // Older releases allowed any peer to replace playback with an arbitrary queue entry.
                 return false;
             }
 
@@ -1539,12 +1599,12 @@ namespace OnTogetherSchoolScreen
             if (operation == 1)
             {
                 string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex);
-                if (id != null) plugin._networkQueue.Enqueue("OPEN|" + id + "|0|" + peerToken);
+                if (id != null) plugin._networkQueue.Enqueue("OPEN|" + id + "|0|" + peerToken + "|" + (encodedOperation >> 4));
             }
             else if (operation == 2) plugin._networkQueue.Enqueue("PLAY|" + peerToken);
             else if (operation == 3) plugin._networkQueue.Enqueue("PAUSE|" + peerToken);
             else if (operation == 4) plugin._networkQueue.Enqueue("SEEK|" + (colIndex / 10f).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + peerToken);
-            else if (operation == 5) plugin._networkQueue.Enqueue("CLEAR|" + peerToken);
+            else if (operation == 5) plugin._networkQueue.Enqueue("CLEAR|" + peerToken + "|" + (encodedOperation >> 4));
             else if (operation == 6)
             {
                 string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex);
