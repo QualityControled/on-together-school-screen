@@ -23,10 +23,16 @@ Windows mod that plays shared YouTube videos on the whiteboard inside the school
 
 Download the ZIP from [GitHub Releases](https://github.com/QualityControled/on-together-school-screen/releases/latest).
 
+### Mod manager
+
+Install through Thunderstore Mod Manager or r2modman. For a local ZIP, use the manager's **Import local mod** option and choose the package. The manager installs the mod files together under its profile's `BepInEx/plugins` folder.
+
+### Manual installation
+
 1. Close On-Together before replacing the mod files.
 2. Install BepInEx for On-Together and the Microsoft Edge WebView2 Runtime.
-3. Extract this package into `BepInEx/plugins/OnTogetherSchoolScreen/`, keeping `OnTogetherSchoolScreen.dll`, `SchoolScreenBrowser.exe`, `www`, and `runtimes` together. When updating, overwrite the existing mod files; do not install a second copy alongside them.
-4. Everyone who wants to watch together should install version 0.1.9 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
+3. Extract the ZIP and copy its **BepInEx** folder into the game folder or the manager's profile folder. The package places the plugin, browser helper, WebView2 DLLs, and `www` folder together inside `BepInEx/plugins`. For manual updates, replace your previous School Screen installation with these files so only one copy of the plugin is loaded. The `www` folder must stay beside `SchoolScreenBrowser.exe`.
+4. Everyone who wants to watch together should install version 0.1.10 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
 
 ## Host and queue moderation
 
@@ -42,7 +48,7 @@ The cutoff is based on distance from the board rather than the school's room bou
 
 ## Limits
 
-- Everyone watching together should use version 0.1.9. Older versions do not understand the updated queue and playback packets.
+- Version 0.1.10 keeps the playback protocol from 0.1.9 and fixes the package layout. Everyone watching together should use 0.1.10; releases before 0.1.9 do not understand the updated queue and playback packets.
 - The mod and browser helper target Windows only. Each player needs WebView2 Runtime installed.
 - The local WebView2 player targets up to 30 board-image updates per second. Actual smoothness depends on game performance and WebView2 capture speed.
 - YouTube must allow the video to be embedded. Some private, age-restricted, or region-restricted videos may not play.
@@ -68,6 +74,16 @@ dotnet build .\src\SchoolScreenBrowser\SchoolScreenBrowser.csproj --configuratio
 ```
 
 The browser helper uses Microsoft's WebView2 NuGet package. Players also need the WebView2 Runtime installed. Do not commit game assemblies, BepInEx files, generated `bin`/`obj` folders, or packaged release binaries to the source repository.
+
+Build a mod-manager package with:
+
+```powershell
+.\scripts\Build-Package.ps1 `
+  -GameManagedDir="C:\path\to\OnTogether_Data\Managed" `
+  -BepInExCoreDir="C:\path\to\BepInEx\core"
+```
+
+The package builder keeps metadata at the ZIP root and puts the runtime files inside `BepInEx/plugins`. See [test instructions](tests/README.md) and [recorded validation](tests/VALIDATION.md) for installation checks and their limits.
 
 ## Repository
 

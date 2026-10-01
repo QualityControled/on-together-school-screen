@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace OnTogetherSchoolScreen
 {
-    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.9")]
+    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.10")]
     public sealed class SchoolScreenPlugin : BaseUnityPlugin
     {
         private const float BoardCommandMarker = -2f;

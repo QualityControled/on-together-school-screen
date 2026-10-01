@@ -62,18 +62,26 @@ namespace SchoolScreenBrowser
                 _writer = new BinaryWriter(_pipe, Encoding.UTF8, true);
                 _ = Task.Run(ReadCommandsAsync);
 
+                string www = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "www");
+                if (!File.Exists(Path.Combine(www, "index.html")))
+                    throw new FileNotFoundException("The school screen player page is missing. Reinstall the complete mod package.");
                 string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OnTogetherSchoolScreen", "WebView2");
                 Directory.CreateDirectory(appData);
                 var options = new CoreWebView2EnvironmentOptions("--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling");
                 CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, appData, options);
                 await _webView.EnsureCoreWebView2Async(environment);
-                string www = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "www");
                 _webView.CoreWebView2.SetVirtualHostNameToFolderMapping("schoolvideo.local", www, CoreWebView2HostResourceAccessKind.Allow);
                 _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                 _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 _webView.CoreWebView2.NavigationCompleted += (_, e) =>
                 {
                     _webReady = e.IsSuccess;
+                    if (!_webReady)
+                    {
+                        SendPacket((byte)'E', Encoding.UTF8.GetBytes("The player page could not load: " + e.WebErrorStatus));
+                        return;
+                    }
+                    SendPacket((byte)'S', Encoding.UTF8.GetBytes("READY|page"));
                     string command;
                     while (_webReady && _pendingCommands.TryDequeue(out command))
                         _ = ExecuteCommandAsync(command);

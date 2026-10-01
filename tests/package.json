@@ -1,0 +1,6 @@
+{
+  "name": "school-screen-package-checks",
+  "private": true,
+  "type": "module",
+  "dependencies": { "jszip": "3.10.1" }
+}

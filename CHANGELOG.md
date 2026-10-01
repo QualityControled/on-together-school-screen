@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10
+
+- Put the mod payload inside `BepInEx/plugins` so mod managers preserve the `www/index.html` path and keep the browser helper beside its dependencies.
+- Package one x64 `WebView2Loader.dll` beside the browser executable, removing the duplicate native loader and unused WPF assembly.
+- Report a missing player page or failed page navigation instead of silently rendering a blank board.
+- Add a reproducible package builder and automated installer and browser startup checks.
+- Keep the playback and queue protocol from 0.1.9.
+
 ## 0.1.9
 
 - Automatically advance to the next video when playback finishes, using one playback coordinator.
