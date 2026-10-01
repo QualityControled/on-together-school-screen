@@ -2,6 +2,7 @@
 
 ## 0.1.11
 
+- Wait for a spawned board with a network identity and initialized paint data; skip visible scene placeholders, release despawned board references, and retain submitted links while the board is connecting. Prevent unsynchronized local playback when a send fails.
 - Route every presence, queue, vote, and playback packet through the same eraser envelope; fix two outgoing paths that bypassed it in the earlier 0.1.11 package.
 - Confine the vanilla drawing side effect to one top-right corner cell, validate packet fields, and intercept commands only on the school board.
 - Prefer a modded game host as the single playback coordinator; otherwise retain one modded coordinator until they leave. Viewers cannot replace playback or queue snapshots arbitrarily.

@@ -1,6 +1,7 @@
 // Test boundary objects only: no queue, vote, identity, or protocol logic lives here.
 using System.Reflection;
 using OnTogetherSchoolScreen;
+using UnityEngine;
 
 namespace UnityEngine
 {
@@ -13,7 +14,11 @@ namespace UnityEngine
         public static float Max(float a, float b) => Math.Max(a, b);
     }
     public class Texture2D { }
-    public class Renderer { }
+    public readonly record struct Scene(bool Valid = true) { public bool IsValid() => Valid; }
+    public class GameObject { public string name = "DrawingBoard"; public Scene scene = new(true); public bool activeInHierarchy = true; }
+    public class Transform { public string name; public Transform parent; }
+    public static class Resources { public static object[] Objects = []; public static T[] FindObjectsOfTypeAll<T>() => Objects.OfType<T>().ToArray(); }
+    public class Renderer { public GameObject gameObject; public Material material = new(); }
     public class Material { }
     public class GUIStyle { }
     public struct Rect { }
@@ -24,6 +29,7 @@ namespace PurrNet
     public readonly record struct PlayerID(int Value) { public override string ToString() => Value == 0 ? "Server" : Value.ToString("D3"); }
     public struct RPCInfo { public PlayerID sender; }
     public static class NetworkSingleton<T> { public static T I; }
+    public sealed class NetworkManager { }
 }
 
 public static class MonoSingleton<T> { public static T I; }
@@ -45,15 +51,26 @@ public sealed class PlayerPanelController
     public List<string> PlayerSteamIDs = new();
     public string HostId = "steam:0";
 }
-public sealed class TestLogger { public void LogWarning(object message) { } }
+public sealed class TestLogger { public void LogWarning(object message) { } public void LogInfo(object message) { } }
 public sealed class Harmony { }
 public readonly record struct Packet(UnityEngine.Vector2 Uv, UnityEngine.Vector2 Previous, int Color, bool Erase, bool BigErase);
 public sealed class QuadPainterGPU
 {
+    public bool isSpawned = true;
+    public int? id = 1;
+    public PurrNet.NetworkManager networkManager = new();
+    public object[] PaintColors = [new object()];
+    public GameObject gameObject = new();
+    public Transform transform = new() { name = "DrawingBoard", parent = new() { name = "MD_SchoolInterior" } };
+    public Renderer Renderer;
+    public int RpcAttempts;
+    public T GetComponent<T>() where T : class => (Renderer ??= new Renderer { gameObject = gameObject }) as T;
     public readonly List<Packet> Sent = new();
     public Action<Packet> Deliver;
     public void FillTheBlanksRPC(UnityEngine.Vector2 uv, UnityEngine.Vector2 previous, int color, bool erase, bool bigErase)
     {
+        RpcAttempts++;
+        if (!isSpawned) return; // Native sender reports the error and returns, rather than throwing.
         Packet packet = new(uv, previous, color, erase, bigErase);
         Sent.Add(packet);
         Deliver?.Invoke(packet);
@@ -66,6 +83,8 @@ namespace OnTogetherSchoolScreen
     {
         private readonly TestLogger Logger = new();
         public readonly List<string> HelperCommands = new();
+        public int BrowserStartCount;
+        private void StartBrowser() => BrowserStartCount++;
         private void SendHelper(string command) => HelperCommands.Add(command);
         private void RequestQueueTitle(string id) { }
         private void UpdateLocalVolume(bool force) { }

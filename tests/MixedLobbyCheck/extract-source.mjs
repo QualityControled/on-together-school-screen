@@ -6,7 +6,7 @@ const [input, output] = process.argv.slice(2);
 if (!input || !output) throw new Error('Usage: node extract-source.mjs <SchoolScreenPlugin.cs> <output.cs>');
 const source = fs.readFileSync(input, 'utf8');
 const methods = [
-  'UpdateHostState', 'ReadIsServer', 'ResetLobbyState', 'UpdateLobbyPresence', 'EnsureHostMember',
+  'FindSchoolBoard', 'UpdateHostState', 'ReadIsServer', 'ResetLobbyState', 'UpdateLobbyPresence', 'EnsureHostMember',
   'PruneStalePeers', 'GetLocalPlayerName', 'CreatePeerToken', 'EncodeBoardMarker', 'TryDecodeBoardMarker',
   'GetActivePeerCount', 'GetLowestActivePeerToken', 'BroadcastPeerPresence', 'SendPeerPacket',
   'AddVideoToQueue', 'ToggleSkipVote', 'SkipCurrentVideo', 'IsLocalPlaybackCoordinator', 'UpdateQueuePlayback',
@@ -55,7 +55,7 @@ function extract(name, isClass = false) {
 // Include new product helpers reached by these methods automatically, while keeping
 // the named IO/native boundaries as stubs. This prevents a copied test implementation
 // from silently taking over when product code grows another pure helper.
-const boundaries = new Set(['SendHelper', 'RequestQueueTitle', 'UpdateLocalVolume']);
+const boundaries = new Set(['StartBrowser', 'SendHelper', 'RequestQueueTitle', 'UpdateLocalVolume']);
 const declarations = new Set([...source.matchAll(/^[ \t]*private (?:static )?[^\r\n]+?\b(\w+)\([^;{}]*\)/gm)].map(match => match[1]));
 const selected = methods.map(name => ({ name, text: extract(name) }));
 const names = new Set(methods);
@@ -77,7 +77,7 @@ fs.writeFileSync(output, all);
 fs.writeFileSync(`${output}.json`, JSON.stringify({
   input: path.resolve(input), sourceSha256: crypto.createHash('sha256').update(source).digest('hex'),
   methods: selected.map(item => ({ name: item.name, sha256: crypto.createHash('sha256').update(item.text).digest('hex') })),
-  boundaryStubs: ['Unity/PurrNet APIs', 'SendHelper', 'RequestQueueTitle', 'UpdateLocalVolume'],
+  boundaryStubs: ['Unity/PurrNet APIs', 'StartBrowser', 'SendHelper', 'RequestQueueTitle', 'UpdateLocalVolume'],
   limitation: 'Selected unchanged product method bodies execute against test doubles. This is not a live Unity or network test.'
 }, null, 2));
 const calls = [...source.matchAll(/\.FillTheBlanksRPC\s*\(/g)].length;

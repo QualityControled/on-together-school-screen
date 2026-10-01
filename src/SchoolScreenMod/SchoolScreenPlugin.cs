@@ -47,6 +47,7 @@ namespace OnTogetherSchoolScreen
         private Texture2D _videoTexture;
         private byte[] _pendingJpeg;
         private QuadPainterGPU _schoolBoard;
+        private float _nextBoardSearch;
         private Renderer _schoolRenderer;
         private Material _schoolMaterial;
         private bool _panelOpen;
@@ -194,7 +195,7 @@ namespace OnTogetherSchoolScreen
                     ApplyTexture();
                 }
             }
-            if (_schoolBoard != null && !string.IsNullOrEmpty(_videoId) && IsLocalPlaybackCoordinator() && Time.unscaledTime >= _nextSync)
+            if (IsBoardNetworkReady(_schoolBoard) && !string.IsNullOrEmpty(_videoId) && IsLocalPlaybackCoordinator() && Time.unscaledTime >= _nextSync)
             {
                 _nextSync = Time.unscaledTime + 10.0f;
                 SendBoardCommand("SYNC", _videoId, _videoTime, _playerState);
@@ -203,12 +204,17 @@ namespace OnTogetherSchoolScreen
 
         private void FindSchoolBoard()
         {
-            if (_schoolRenderer != null && _schoolRenderer.gameObject != null) return;
+            if (IsBoardNetworkReady(_schoolBoard) && _schoolRenderer != null && _schoolRenderer.gameObject != null) return;
+            _schoolBoard = null;
+            _schoolRenderer = null;
+            _schoolMaterial = null;
+            if (Time.unscaledTime < _nextBoardSearch) return;
+            _nextBoardSearch = Time.unscaledTime + 0.5f;
             QuadPainterGPU[] boards = Resources.FindObjectsOfTypeAll<QuadPainterGPU>();
             for (int i = 0; i < boards.Length; i++)
             {
                 QuadPainterGPU board = boards[i];
-                if (board == null || !board.gameObject.scene.IsValid() || !board.gameObject.activeInHierarchy) continue;
+                if (!IsBoardNetworkReady(board)) continue;
                 if (!string.Equals(board.gameObject.name, "DrawingBoard", StringComparison.Ordinal)) continue;
                 Transform parent = board.transform;
                 bool inSchool = false;
@@ -218,15 +224,25 @@ namespace OnTogetherSchoolScreen
                     parent = parent.parent;
                 }
                 if (!inSchool) continue;
+                Renderer renderer = board.GetComponent<Renderer>();
+                if (renderer == null) continue;
                 _schoolBoard = board;
-                _schoolRenderer = board.GetComponent<Renderer>();
-                if (_schoolRenderer == null) continue;
+                _schoolRenderer = renderer;
                 _schoolMaterial = _schoolRenderer.material;
                 _status = "School whiteboard found. Press F9 to open controls.";
                 StartBrowser();
-                Logger.LogInfo("Attached to the DrawingBoard inside MD_SchoolInterior.");
+                Logger.LogInfo("Attached to the network-spawned DrawingBoard inside MD_SchoolInterior.");
                 break;
             }
+        }
+
+        private static bool IsBoardNetworkReady(QuadPainterGPU board)
+        {
+            // Scene/prefab copies can be visible before PurrNet assigns their identity.
+            // Its RPC wrapper logs instead of throwing when called on an unspawned copy.
+            return board != null && board.gameObject.scene.IsValid() && board.gameObject.activeInHierarchy
+                && board.isSpawned && board.id.HasValue && board.networkManager != null
+                && board.PaintColors != null && board.PaintColors.Length > 0;
         }
 
         private void StartBrowser()
@@ -462,6 +478,7 @@ namespace OnTogetherSchoolScreen
             _schoolBoard = null;
             _schoolRenderer = null;
             _schoolMaterial = null;
+            _nextBoardSearch = 0f;
             string ignored;
             while (_networkQueue.TryDequeue(out ignored)) { }
             _status = "Lobby changed. Previous video and queue cleared.";
@@ -469,7 +486,7 @@ namespace OnTogetherSchoolScreen
 
         private void UpdateLobbyPresence()
         {
-            if (_schoolBoard == null || Time.unscaledTime < _nextLobbyHeartbeat) return;
+            if (!IsBoardNetworkReady(_schoolBoard) || Time.unscaledTime < _nextLobbyHeartbeat) return;
             _nextLobbyHeartbeat = Time.unscaledTime + 5f;
             BroadcastPeerPresence();
             PruneStalePeers();
@@ -590,16 +607,16 @@ namespace OnTogetherSchoolScreen
 
         private void BroadcastPeerPresence()
         {
-            if (_schoolBoard == null) return;
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             _peerLastSeen[_localPeerToken] = Time.unscaledTime;
             SendPeerPacket(11, "PEER|" + _localPeerToken);
         }
 
         private void SendPeerPacket(int packetType, string localMessage)
         {
-            if (_schoolBoard == null) return;
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             var uv = new Vector2(EncodeBoardMarker(_localPeerToken), packetType);
-            SendBoardPayload(uv, Vector2.zero, 0);
+            if (!SendBoardPayload(uv, Vector2.zero, 0)) return;
             if (!string.IsNullOrEmpty(localMessage)) HandleNetworkCommand(localMessage);
         }
 
@@ -693,7 +710,7 @@ namespace OnTogetherSchoolScreen
         {
             bool isError = _status.StartsWith("WebView2 error", StringComparison.Ordinal) || _status.StartsWith("Could not start", StringComparison.Ordinal);
             string statusText = isError ? _status
-                : _schoolRenderer == null ? "Whiteboard not found yet"
+                : !IsBoardNetworkReady(_schoolBoard) ? "Connecting to school whiteboard…"
                 : !_pipeConnected ? "Starting video player…"
                 : string.IsNullOrEmpty(_videoId) ? "Ready to play a video"
                 : string.IsNullOrWhiteSpace(_videoTitle) ? "Loading video title…"
@@ -708,7 +725,7 @@ namespace OnTogetherSchoolScreen
 
             bool boardHasVideo = !string.IsNullOrEmpty(_videoId) || _videoQueue.Count > 0;
             bool previousEnabled = GUI.enabled;
-            GUI.enabled = _schoolBoard != null;
+            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard);
             if (GUI.Button(new Rect(20, 197, 416, 38), boardHasVideo ? "ADD TO QUEUE" : "PLAY ON THE BOARD", _primaryButtonStyle))
             {
                 if (boardHasVideo)
@@ -720,7 +737,7 @@ namespace OnTogetherSchoolScreen
             }
 
             GUI.Label(new Rect(20, 243, 416, 16), "PLAYBACK", _sectionStyle);
-            GUI.enabled = !string.IsNullOrEmpty(_videoId);
+            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard) && !string.IsNullOrEmpty(_videoId);
             const float gap = 6;
             float controlWidth = (416 - 2 * gap) / 3;
             if (GUI.Button(new Rect(20, 262, controlWidth, 33), "Play", _controlButtonStyle)) Control("PLAY");
@@ -752,6 +769,8 @@ namespace OnTogetherSchoolScreen
 
         private void DrawQueueTab()
         {
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard);
             GUI.Label(new Rect(20, 103, 416, 20), "ADD A VIDEO TO THE QUEUE", _sectionStyle);
             Rect inputRect = new Rect(20, 128, 296, 36);
             _url = GUI.TextField(inputRect, _url, _inputStyle);
@@ -797,6 +816,7 @@ namespace OnTogetherSchoolScreen
                 }
             }
             GUI.EndScrollView();
+            GUI.enabled = previousEnabled;
             GUI.Label(new Rect(20, 451, 416, 16), _host ? "You can skip any time or play a queued video." : "Videos play in order. Vote to skip the current video.", _hintStyle);
         }
 
@@ -941,9 +961,9 @@ namespace OnTogetherSchoolScreen
                 _status = "Paste a YouTube URL or an 11-character video ID.";
                 return;
             }
-            if (_schoolBoard == null)
+            if (!IsBoardNetworkReady(_schoolBoard))
             {
-                _status = "The school whiteboard is not ready yet.";
+                _status = "Connecting to the school whiteboard. Try again shortly.";
                 return;
             }
             AddVideoToQueue();
@@ -977,16 +997,20 @@ namespace OnTogetherSchoolScreen
                 return;
             }
 
-            if (_schoolBoard == null)
+            if (!IsBoardNetworkReady(_schoolBoard))
             {
-                _queueStatus = "The school whiteboard is not ready yet.";
+                _queueStatus = "Connecting to the school whiteboard. Try again shortly.";
                 return;
             }
             int sequence = NextQueueEventSequence();
             int encodedOperation = (sequence << 4) | 10;
             Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation);
             Vector2 previous = new Vector2(PackVideoIdGroup(id, 0, 4), PackVideoIdGroup(id, 4, 4));
-            SendBoardPayload(uv, previous, PackVideoIdGroup(id, 8, 3));
+            if (!SendBoardPayload(uv, previous, PackVideoIdGroup(id, 8, 3)))
+            {
+                _queueStatus = "Could not add the video. Try again shortly.";
+                return;
+            }
             HandleNetworkCommand("QUEUE_ADD|" + _localPeerToken + "|" + sequence + "|" + id);
             _queueStatus = "Added to the queue.";
             _url = "";
@@ -994,6 +1018,7 @@ namespace OnTogetherSchoolScreen
 
         private void ToggleSkipVote()
         {
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             if (_host)
             {
                 SkipCurrentVideo();
@@ -1006,6 +1031,7 @@ namespace OnTogetherSchoolScreen
 
         private void SkipCurrentVideo()
         {
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             if ((!_host && !IsLocalPlaybackCoordinator()) || string.IsNullOrEmpty(_videoId)) return;
             AdvanceQueue();
         }
@@ -1048,7 +1074,7 @@ namespace OnTogetherSchoolScreen
 
         private void UpdateQueuePlayback()
         {
-            if (_schoolBoard == null) return;
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             if (string.IsNullOrEmpty(_videoId) && Time.unscaledTime < _nextQueueStartAt) return;
             if (_playbackSession.ShouldAdvance(IsLocalPlaybackCoordinator(), _queueStartRequested, _videoQueue.Count > 0))
                 AdvanceQueue();
@@ -1070,6 +1096,7 @@ namespace OnTogetherSchoolScreen
 
         private void AdvanceQueue()
         {
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             if (!_host && !IsLocalPlaybackCoordinator()) return;
             _queueStartRequested = false;
             _localVotedSkip = false;
@@ -1086,7 +1113,7 @@ namespace OnTogetherSchoolScreen
 
         private void PlayQueuedVideo(int index)
         {
-            if (!_host || index < 0 || index >= _videoQueue.Count || _schoolBoard == null) return;
+            if (!_host || index < 0 || index >= _videoQueue.Count || !IsBoardNetworkReady(_schoolBoard)) return;
             QueueEntry selected = _videoQueue[index];
             _videoQueue.RemoveAt(index);
             BroadcastQueueSnapshot();
@@ -1096,14 +1123,14 @@ namespace OnTogetherSchoolScreen
 
         private void RemoveQueuedVideo(int index)
         {
-            if (!_host || index < 0 || index >= _videoQueue.Count) return;
+            if (!_host || index < 0 || index >= _videoQueue.Count || !IsBoardNetworkReady(_schoolBoard)) return;
             _videoQueue.RemoveAt(index);
             BroadcastQueueSnapshot();
         }
 
         private void BroadcastQueueSnapshot()
         {
-            if (_schoolBoard == null) return;
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
             SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 7f), Vector2.zero, 0);
             for (int i = 0; i < _videoQueue.Count; i++)
             {
@@ -1121,7 +1148,7 @@ namespace OnTogetherSchoolScreen
             _reportedModCount = GetActivePeerCount();
             _voteCount = GetActiveVoteCount();
             _votesRequired = GetRequiredVotes();
-            if ((IsLocalPlaybackCoordinator() || transferIdleState) && _schoolBoard != null)
+            if ((IsLocalPlaybackCoordinator() || transferIdleState) && IsBoardNetworkReady(_schoolBoard))
             {
                 float marker = EncodeBoardMarker(_localPeerToken);
                 if (includeSnapshot)
@@ -1147,14 +1174,23 @@ namespace OnTogetherSchoolScreen
             return Math.Max(1, (int)Math.Ceiling(GetActivePeerCount() * 0.30));
         }
 
-        private void SendBoardPayload(Vector2 uv, Vector2 prevUV, int colIndex)
+        private bool SendBoardPayload(Vector2 uv, Vector2 prevUV, int colIndex)
         {
+            if (!IsBoardNetworkReady(_schoolBoard)) return false;
             // Clamp to the top-right corner on vanilla boards: just one cell can be erased.
             // A negative previous X prevents interpolation; erase mode ignores the color field.
             if (uv.y == 0f) uv.y = 16f;
             var safePrevUv = new Vector2(BoardPacketEnvelope.EncodeFirstGroup(prevUV.x), prevUV.y);
-            try { _schoolBoard.FillTheBlanksRPC(uv, safePrevUv, colIndex, BoardPacketEnvelope.IsErase, BoardPacketEnvelope.IsBigErase); }
-            catch (Exception ex) { Logger.LogWarning("Could not send lobby update: " + ex.GetBaseException().Message); }
+            try
+            {
+                _schoolBoard.FillTheBlanksRPC(uv, safePrevUv, colIndex, BoardPacketEnvelope.IsErase, BoardPacketEnvelope.IsBigErase);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("Could not send lobby update: " + ex.GetBaseException().Message);
+                return false;
+            }
         }
 
         private static string ShortTitle(string value, int maxLength)
@@ -1199,7 +1235,7 @@ namespace OnTogetherSchoolScreen
 
         private void SendBoardCommand(string command, string videoId = null, float seconds = 0f, int state = 1)
         {
-            if (_schoolBoard == null) return;
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
 
             int operation;
             int encodedOperation;
@@ -1252,8 +1288,7 @@ namespace OnTogetherSchoolScreen
             else if (operation == 5) localCommand = "CLEAR|" + _localPeerToken + "|" + sequence;
             else localCommand = "SYNC|" + videoId + "|" + ((encodedOperation >> 4) / 10f).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + ((encodedOperation & 8) != 0 ? "2" : "1") + "|" + _localPeerToken;
 
-            HandleNetworkCommand(localCommand);
-            SendBoardPayload(uv, prevUv, thirdGroup);
+            if (SendBoardPayload(uv, prevUv, thirdGroup)) HandleNetworkCommand(localCommand);
         }
 
         private void HandleNetworkCommand(string message)

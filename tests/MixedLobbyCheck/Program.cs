@@ -8,6 +8,7 @@ using UnityEngine;
 try
 {
     PacketRoundTrips();
+    BoardReadiness();
     HostlessMixedLobby();
     IdleQueueLateJoin();
     QuickReconnect();
@@ -35,6 +36,59 @@ static int QueueSize(Peer peer) => ((IList)peer.Plugin.Read("_videoQueue")).Coun
 static string Video(Peer peer) => (string)peer.Plugin.Read("_videoId");
 static int Count(Peer peer) => (int)peer.Plugin.Invoke("GetActivePeerCount");
 static int Required(Peer peer) => (int)peer.Plugin.Invoke("GetRequiredVotes");
+
+static void BoardReadiness()
+{
+    Time.unscaledTime = 0;
+    var hub = new Hub(3);
+    Peer peer = hub.Add(1, 100);
+    peer.Board.isSpawned = false;
+    peer.Call("SendBoardPayload", new Vector2(2f, 11f), Vector2.zero, 0);
+    Assert(peer.Board.RpcAttempts == 0, "An unspawned board still reached the native RPC wrapper.");
+    peer.Plugin.Write("_url", "AAAAAAAAAAA");
+    peer.Call("AddVideoToQueue"); peer.Call("BroadcastPeerPresence"); peer.Call("RequestQueueStart");
+    peer.Call("SendBoardCommand", "OPEN", "AAAAAAAAAAA", 0f, 1);
+    Assert(peer.Board.RpcAttempts == 0 && QueueSize(peer) == 0 && Video(peer) == ""
+        && (string)peer.Plugin.Read("_url") == "AAAAAAAAAAA", "Unready actions sent traffic, changed playback, or discarded the submitted link.");
+
+    foreach (Action<QuadPainterGPU> makeUnready in new Action<QuadPainterGPU>[] {
+        board => board.id = null, board => board.networkManager = null,
+        board => board.PaintColors = null, board => board.PaintColors = [],
+        board => board.gameObject.activeInHierarchy = false, board => board.gameObject.scene = new(false) })
+    {
+        var board = new QuadPainterGPU(); makeUnready(board); peer.Plugin.Write("_schoolBoard", board);
+        peer.Call("SendBoardPayload", new Vector2(2f, 11f), Vector2.zero, 0);
+        Assert(board.RpcAttempts == 0, "An incomplete/inactive board reached the RPC wrapper.");
+    }
+
+    var placeholder = new QuadPainterGPU { isSpawned = false };
+    var live = new QuadPainterGPU();
+    Resources.Objects = [placeholder, live];
+    peer.Plugin.Write("_schoolBoard", null);
+    peer.Call("FindSchoolBoard");
+    Assert(ReferenceEquals(peer.Plugin.Read("_schoolBoard"), live) && peer.Plugin.BrowserStartCount == 1,
+        "Lookup selected the unspawned scene copy instead of the spawned board.");
+    live.isSpawned = false;
+    Time.unscaledTime = 0.1f;
+    peer.Call("FindSchoolBoard");
+    Assert(peer.Plugin.Read("_schoolBoard") == null && peer.Plugin.Read("_schoolRenderer") == null,
+        "Cached renderer kept a despawned board attached.");
+    var replacement = new QuadPainterGPU();
+    Resources.Objects = [placeholder, live, replacement];
+    Time.unscaledTime = 0.6f;
+    peer.Call("FindSchoolBoard");
+    peer.Call("AddVideoToQueue"); hub.Drain();
+    Assert(ReferenceEquals(peer.Plugin.Read("_schoolBoard"), replacement) && QueueSize(peer) == 1
+        && replacement.RpcAttempts > 0, "The replacement board did not resume queueing after readiness.");
+    int before = replacement.RpcAttempts;
+    replacement.isSpawned = false;
+    Time.unscaledTime = 2;
+    peer.Call("UpdateQueuePlayback"); peer.Call("AdvanceQueue");
+    Assert(QueueSize(peer) == 1 && replacement.RpcAttempts == before && Video(peer) == "",
+        "Despawn discarded a pending video or started unsynchronized playback.");
+    Resources.Objects = [];
+    Console.WriteLine("PASS: unspawned/incomplete boards send no RPC or local playback; lookup ignores placeholders, releases stale caches, and recovers on a spawned replacement.");
+}
 
 static void PacketRoundTrips()
 {

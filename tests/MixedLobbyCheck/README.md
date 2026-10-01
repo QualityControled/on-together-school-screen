@@ -13,6 +13,7 @@ Optional arguments: `-PluginSource <source-file>` for an older source positive c
 Checks include:
 
 - The single safe outgoing board RPC wrapper, every nonzero 20-bit peer token, and 1,005 sample/boundary video IDs.
+- Board lookup and sending with unspawned, missing-identity, missing-manager, uninitialized, inactive, and invalid-scene boards; cached renderer invalidation, recovery on a replacement board, retained input, and no unsynchronized queue advancement.
 - Nonhost queueing with an unmodded server, FIFO start/advance, late join playback/queue discovery, and idle coordination when a newcomer has the lowest token.
 - Modded-only electorate and 30% rounding, existing partial votes reaching a late joiner, local vote removal converging after an older queued snapshot, and an already-met lower vote threshold after a departure.
 - Coordinator departure followed by immediate handoff packets before followers run their own periodic prune.
@@ -23,7 +24,7 @@ Checks include:
 
 Every emitted packet must use small erase mode, a negative previous X, and UVs beyond the upper/right bounds, avoiding vanilla interpolation and palette lookup while limiting the eraser dab to one corner cell. Delivery failures are recorded independently so the product's ordinary exception handler cannot swallow a failed test assertion.
 
-The previous 0.1.11 source is expected to fail the wrapper check: its queue and presence helpers sent unsafe direct packets outside `SendBoardPayload`.
+The earlier 0.1.11 source is expected to fail the wrapper check: its queue and presence helpers sent unsafe direct packets outside `SendBoardPayload`. The later source before the readiness fix passes the envelope checks but fails because an unspawned board still reaches the native RPC wrapper.
 
 The optional compiled check reads managed IL/metadata without executing either DLL. It verifies the actual plugin has exactly one outgoing RPC call site, inside `SendBoardPayload`, with literal `true,false` small erase flags and no other outgoing RPC calls. It also compares Harmony prefix argument names and types against `QuadPainterGPU.FillTheBlanksRPC_Original_2` in the supplied game assembly, including `rpcInfo` sender context.
 
