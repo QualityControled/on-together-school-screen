@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+  <style>
+    html, body, #player, #waiting { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #080a10; color: #f5f5f5; font: 20px Segoe UI, sans-serif; }
+    #waiting { display: grid; place-items: center; position: absolute; inset: 0; background: #10151e; }
+    #titleLookup { position: fixed; left: -1200px; top: -1200px; width: 320px; height: 180px; opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="player"></div>
+  <div id="waiting">School screen · waiting for the host to share a video</div>
+  <div id="titleLookup" aria-hidden="true"></div>
+  <script>
+    let player = null;
+    let playerReady = false;
+    let titleLookupPlayer = null;
+    let titleLookupReady = false;
+    let activeTitleLookup = null;
+    let titleLookupStartedAt = 0;
+    const titleLookupQueue = [];
+    const titleLookupQueued = new Set();
+    const pending = [];
+    const waiting = document.getElementById('waiting');
+
+    function invokePending() {
+      if (!playerReady) return;
+      while (pending.length) applyCommand(pending.shift());
+    }
+
+    function applyCommand(command) {
+      if (command.type === 'open') {
+        waiting.style.display = 'none';
+        player.loadVideoById({ videoId: command.id, startSeconds: command.time });
+      } else if (command.type === 'clear') {
+        waiting.style.display = 'grid';
+        if (player) player.stopVideo();
+      } else if (command.type === 'play') {
+        player.playVideo();
+      } else if (command.type === 'pause') {
+        player.pauseVideo();
+      } else if (command.type === 'seek') {
+        player.seekTo(command.time, true);
+      } else if (command.type === 'volume') {
+        player.setVolume(command.volume);
+      }
+    }
+
+    window.schoolScreenCommand = function (type, value, time) {
+      const command = type === 'open'
+        ? { type: type, id: value, time: Number(time) || 0 }
+        : type === 'volume'
+          ? { type: type, volume: Math.max(0, Math.min(100, Number(value) || 0)) }
+        : { type: type, time: Number(value) || 0 };
+      if (!playerReady) pending.push(command);
+      else applyCommand(command);
+    };
+
+    function startTitleLookup() {
+      if (!titleLookupReady || activeTitleLookup || titleLookupQueue.length === 0) return;
+      activeTitleLookup = titleLookupQueue.shift();
+      titleLookupStartedAt = Date.now();
+      try {
+        titleLookupPlayer.cueVideoById(activeTitleLookup);
+        setTimeout(checkTitleLookup, 200);
+      } catch (_) {
+        finishTitleLookup('');
+      }
+    }
+
+    function checkTitleLookup() {
+      if (!activeTitleLookup || !titleLookupPlayer) return;
+      try {
+        const data = titleLookupPlayer.getVideoData ? titleLookupPlayer.getVideoData() : null;
+        const idMatches = data && (!data.video_id || data.video_id === activeTitleLookup);
+        const title = data && data.title ? String(data.title).replace(/[|\r\n]+/g, ' ').trim() : '';
+        if (title && idMatches && titleLookupPlayer.getPlayerState() === 5) {
+          finishTitleLookup(title);
+          return;
+        }
+      } catch (_) { }
+
+      if (Date.now() - titleLookupStartedAt >= 12000) finishTitleLookup('');
+      else setTimeout(checkTitleLookup, 250);
+    }
+
+    function finishTitleLookup(title) {
+      const id = activeTitleLookup;
+      if (!id) return;
+      activeTitleLookup = null;
+      if (title) window.chrome.webview.postMessage('TITLE|' + id + '|' + title.slice(0, 100));
+      setTimeout(startTitleLookup, 150);
+    }
+
+    window.schoolScreenLookupTitle = function (id) {
+      id = String(id || '').trim();
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || titleLookupQueued.has(id)) return;
+      titleLookupQueued.add(id);
+      titleLookupQueue.push(id);
+      startTitleLookup();
+    };
+
+    window.schoolScreenResetTitleLookups = function () {
+      titleLookupQueue.length = 0;
+      titleLookupQueued.clear();
+      activeTitleLookup = null;
+      if (titleLookupPlayer && titleLookupPlayer.stopVideo) titleLookupPlayer.stopVideo();
+    };
+
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('player', {
+        width: Math.max(200, window.innerWidth), height: Math.max(200, window.innerHeight),
+        playerVars: {
+          controls: 1,
+          playsinline: 1,
+          rel: 0,
+          origin: window.location.origin
+        },
+        events: {
+          onReady: function () { playerReady = true; invokePending(); },
+          onStateChange: function () { sendState(); }
+        }
+      });
+      titleLookupPlayer = new YT.Player('titleLookup', {
+        width: 320, height: 180,
+        playerVars: { autoplay: 0, controls: 0, disablekb: 1, playsinline: 1, origin: window.location.origin },
+        events: {
+          onReady: function (event) {
+            titleLookupReady = true;
+            if (event.target.mute) event.target.mute();
+            startTitleLookup();
+          }
+        }
+      });
+    };
+
+    function sendState() {
+      if (!player || !player.getCurrentTime) return;
+      const time = Number(player.getCurrentTime()) || 0;
+      const state = Number(player.getPlayerState());
+      const videoData = player.getVideoData ? player.getVideoData() : null;
+      const title = videoData && videoData.title ? String(videoData.title).replace(/[|\r\n]+/g, ' ').slice(0, 100) : '';
+      window.chrome.webview.postMessage('STATE|' + time.toFixed(1) + '|' + state + '|' + title);
+    }
+    setInterval(sendState, 1000);
+
+    const api = document.createElement('script');
+    api.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(api);
+  </script>
+</body>
+</html>
