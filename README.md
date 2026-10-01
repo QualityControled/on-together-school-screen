@@ -18,6 +18,7 @@ Windows mod that plays shared YouTube videos on the whiteboard inside the school
 - Gives each player an independent volume control with distance falloff, a 0–200% distance-compensation slider, a live meter, and mute.
 - Loads video and audio locally for each player; video frames are not sent over the game network.
 - Targets a 30 FPS whiteboard refresh while the game can keep up.
+- Shows a color-changing, bouncing DVD-style logo behind the F9 prompt while the board is waiting for a video.
 
 ## Install
 
@@ -35,6 +36,8 @@ Install through Thunderstore Mod Manager or r2modman. For a local ZIP, use the m
 4. Everyone who wants to watch together should install version 0.1.11 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
 
 ### Updating from an older version
+
+The GitHub 0.1.11 ZIP was refreshed to include the DVD-style waiting screen. If you downloaded 0.1.11 before that change, download the ZIP again and reinstall it to get the animation; its version number is still 0.1.11.
 
 Version 0.1.11 removes a player-discovery message that older versions sent through the game's report-player system. That message could repeatedly open a **Kick Player?** dialog on a host without the mod. All School Screen users in the lobby should update to 0.1.11; an older client can still cause these dialogs.
 

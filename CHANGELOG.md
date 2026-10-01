@@ -2,6 +2,7 @@
 
 ## 0.1.11
 
+- Add a bouncing, color-changing DVD-style logo behind the waiting screen's F9 prompt. It stops while a video plays and respects reduced-motion preferences.
 - Remove all player-discovery calls and Harmony hooks involving the game's report-player system, preventing synthetic kick dialogs on hosts without the mod.
 - Discover modded players through whiteboard presence packets and use the RPC's original sender identity for player names and host queue permissions.
 - Send the host's existing queue to newly discovered peers, retire old tokens from the same player, and remove expired members from the Access tab.

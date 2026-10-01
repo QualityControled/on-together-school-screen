@@ -2,6 +2,8 @@
 
 Checked on Windows on 2026-10-01.
 
+The 0.1.11 package was refreshed on the same date to include the approved DVD-style idle splash. The version number is unchanged; earlier 0.1.11 downloads must be replaced to obtain it.
+
 ## Passed
 
 - Plugin and browser Release builds: zero warnings and errors.
@@ -15,12 +17,15 @@ Checked on Windows on 2026-10-01.
 - Disabled and enabled the installed package with the same upstream installer.
 - Launched the installed helper using the single x64 native loader and a separate WebView2 data folder. Its local page loaded, named-pipe communication worked, and it captured a valid JPEG.
 - Loaded video `pqsgpG_OeM8` while muted and received `STATE|0.0|1|This is not a Wii remote...|pqsgpG_OeM8|1` from the installed helper.
+- Repeated the installer and installed-helper checks for the refreshed DVD package. Visually inspected its captured idle JPEG with the DVD-style logo behind the readable F9 prompt, then confirmed muted YouTube playback still reported a playing state.
+- Opened the animation preview in the in-app browser before implementation; the user approved its appearance.
 
 ## Still untested
 
 - Local ZIP import through Thunderstore Mod Manager or r2modman's actual UI. The desktop-control tool failed to initialize with `failed to write kernel assets: The system cannot find the path specified. (os error 3)`, including retries after reset.
 - Launching On-Together through the manager and checking Unity integration, distance-based audio, automatic queue progression, skip votes, and multiplayer synchronization in a live lobby.
 - In-game recovery of the existing host popup backlog, absence of new dialogs with an unmodded host, late-join queue state, player names, and host queue blocking. Their expected behavior was reviewed against code, not exercised in a live lobby.
+- Idle animation on the in-game whiteboard, reduced-motion behavior, and open/clear transitions in a live game session. The installed helper capture and code review cover the new page; these are not a full Unity check.
 
 ## Known transport effect
 
