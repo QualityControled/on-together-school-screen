@@ -32,7 +32,13 @@ Install through Thunderstore Mod Manager or r2modman. For a local ZIP, use the m
 1. Close On-Together before replacing the mod files.
 2. Install BepInEx for On-Together and the Microsoft Edge WebView2 Runtime.
 3. Extract the ZIP and copy its **BepInEx** folder into the game folder or the manager's profile folder. The package places the plugin, browser helper, WebView2 DLLs, and `www` folder together inside `BepInEx/plugins`. For manual updates, replace your previous School Screen installation with these files so only one copy of the plugin is loaded. The `www` folder must stay beside `SchoolScreenBrowser.exe`.
-4. Everyone who wants to watch together should install version 0.1.10 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
+4. Everyone who wants to watch together should install version 0.1.11 and enter the school. Press `F9` to open the controls. The host does not need the mod for playback, queueing, or skip voting. Adding a video starts playback when the board and queue are empty; otherwise it adds to the end of the queue. Videos advance automatically when they finish. If the board is stopped with videos still queued, anyone can press **Play Next** in the Queue tab to start the first entry.
+
+### Updating from an older version
+
+Version 0.1.11 removes a player-discovery message that older versions sent through the game's report-player system. That message could repeatedly open a **Kick Player?** dialog on a host without the mod. All School Screen users in the lobby should update to 0.1.11; an older client can still cause these dialogs.
+
+If a host already has these dialogs, everyone using an older version should leave the lobby to stop new requests. The host can repeatedly click **No** until the queued dialogs are dismissed, keeping the lobby open. An updated client cannot clear dialogs already stored on the host's computer. Avoid clicking **Yes**, which changes the host's ban list.
 
 ## Host and queue moderation
 
@@ -48,7 +54,8 @@ The cutoff is based on distance from the board rather than the school's room bou
 
 ## Limits
 
-- Version 0.1.10 keeps the playback protocol from 0.1.9 and fixes the package layout. Everyone watching together should use 0.1.10; releases before 0.1.9 do not understand the updated queue and playback packets.
+- Everyone watching together should use 0.1.11. It updates the whiteboard packet encoding for compatibility with players without the mod, and older clients can still send the faulty player-discovery requests.
+- Players without the mod see a small corner of the school whiteboard cleared by the mod's messages. The game's drawing system still handles these packets; they do not display videos for players without the mod.
 - The mod and browser helper target Windows only. Each player needs WebView2 Runtime installed.
 - The local WebView2 player targets up to 30 board-image updates per second. Actual smoothness depends on game performance and WebView2 capture speed.
 - YouTube must allow the video to be embedded. Some private, age-restricted, or region-restricted videos may not play.

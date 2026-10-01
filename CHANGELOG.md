@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11
+
+- Remove all player-discovery calls and Harmony hooks involving the game's report-player system, preventing synthetic kick dialogs on hosts without the mod.
+- Discover modded players through whiteboard presence packets and use the RPC's original sender identity for player names and host queue permissions.
+- Send the host's existing queue to newly discovered peers, retire old tokens from the same player, and remove expired members from the Access tab.
+- Encode whiteboard packets as a small eraser dab without stroke interpolation so players without the mod do not interpret packed video data as an invalid paint color. This can clear a small corner of their whiteboard; all viewers should update for the changed encoding.
+- Add a compiled-plugin regression check that detects the unsafe transport in 0.1.10 and rejects any recurrence.
+- Document how hosts can dismiss an existing backlog without closing their lobby.
+
 ## 0.1.10
 
 - Put the mod payload inside `BepInEx/plugins` so mod managers preserve the `www/index.html` path and keep the browser helper beside its dependencies.

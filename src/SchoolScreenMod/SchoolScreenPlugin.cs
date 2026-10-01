@@ -15,7 +15,7 @@ using UnityEngine;
 
 namespace OnTogetherSchoolScreen
 {
-    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.10")]
+    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.11")]
     public sealed class SchoolScreenPlugin : BaseUnityPlugin
     {
         private const float BoardCommandMarker = -2f;
@@ -24,15 +24,12 @@ namespace OnTogetherSchoolScreen
         private const int QueueEventSequenceMask = 0xFFFFF;
         private const float NearBoardDistance = 3f;
         private const float SilentDistance = 18f;
-        private const string ModRequestMarker = "OTSS_QUEUE_V1";
         private const string HostMemberKey = "__local_host__";
         private static SchoolScreenPlugin _instance;
-        [ThreadStatic] private static string _activeLobbyRequestSender;
         private readonly ConcurrentQueue<string> _networkQueue = new ConcurrentQueue<string>();
         private readonly ConcurrentQueue<string> _browserQueue = new ConcurrentQueue<string>();
         private readonly Dictionary<string, LobbyMember> _moddedPlayers = new Dictionary<string, LobbyMember>();
         private readonly HashSet<string> _blockedQueuePlayers = new HashSet<string>();
-        private readonly HashSet<string> _skipVotes = new HashSet<string>();
         private readonly HashSet<int> _peerSkipVotes = new HashSet<int>();
         private readonly Dictionary<int, float> _peerLastSeen = new Dictionary<int, float>();
         private readonly Dictionary<int, string> _peerPlayerKeys = new Dictionary<int, string>();
@@ -54,7 +51,6 @@ namespace OnTogetherSchoolScreen
         private bool _panelOpen;
         private bool _guiInitialized;
         private volatile bool _pipeConnected;
-        private bool _lobbyRequestsAvailable;
         private bool _host;
         private bool _lobbyIdentityInitialized;
         private string _observedLobbyCode;
@@ -100,7 +96,6 @@ namespace OnTogetherSchoolScreen
         private int _activeTab;
         private bool _localVotedSkip;
         private float _nextLobbyHeartbeat;
-        private float _nextMemberPrune;
         private int _reportedModCount;
         private int _voteCount;
         private int _votesRequired;
@@ -119,7 +114,6 @@ namespace OnTogetherSchoolScreen
         private sealed class LobbyMember
         {
             public string Name;
-            public float LastSeen;
             public int PeerToken;
         }
 
@@ -142,23 +136,8 @@ namespace OnTogetherSchoolScreen
                 AccessTools.Method(typeof(QuadPainterGPU), "FillTheBlanksRPC_Original_2"),
                 prefix: new HarmonyMethod(typeof(SchoolScreenPlugin), nameof(ReceiveBoardCommand)));
 
-            bool senderContextPatch = TryPatch(
-                AccessTools.Method(typeof(PlayerController), "HandleRPCGenerated_0"),
-                prefix: new HarmonyMethod(typeof(SchoolScreenPlugin), nameof(CaptureLobbyRequestSender)),
-                postfix: new HarmonyMethod(typeof(SchoolScreenPlugin), nameof(RestoreLobbyRequestSender)));
-            bool lobbyRequestPatch = false;
-            if (senderContextPatch)
-            {
-                lobbyRequestPatch = TryPatch(
-                    AccessTools.Method(typeof(PlayerController), "ReportPlayerRPC_Original_0"),
-                    prefix: new HarmonyMethod(typeof(SchoolScreenPlugin), nameof(ReceiveLobbyRequest)));
-            }
-            _lobbyRequestsAvailable = senderContextPatch && lobbyRequestPatch;
-
             if (boardDisplayPatch && boardNetworkPatch)
                 Logger.LogInfo("Installed school screen board handlers.");
-            if (!_lobbyRequestsAvailable)
-                Logger.LogWarning("Host-side player blocking is unavailable because the lobby RPC hooks could not be installed. Shared playback and queue use the whiteboard RPC.");
             _videoTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false, false)
             {
                 filterMode = FilterMode.Bilinear,
@@ -434,7 +413,6 @@ namespace OnTogetherSchoolScreen
             _queueStartRequested = false;
             _nextQueueStartAt = 0f;
             _videoQueue.Clear();
-            _skipVotes.Clear();
             _peerSkipVotes.Clear();
             _peerLastSeen.Clear();
             _peerPlayerKeys.Clear();
@@ -457,7 +435,6 @@ namespace OnTogetherSchoolScreen
             _peerLastSeen[_localPeerToken] = Time.unscaledTime;
             _nextSync = 0f;
             _nextLobbyHeartbeat = 0f;
-            _nextMemberPrune = 0f;
             _schoolBoard = null;
             _schoolRenderer = null;
             _schoolMaterial = null;
@@ -477,15 +454,7 @@ namespace OnTogetherSchoolScreen
                 bool hadHost = _moddedPlayers.ContainsKey(HostMemberKey);
                 EnsureHostMember();
                 if (!hadHost) BroadcastVoteStatus();
-                if (Time.unscaledTime >= _nextMemberPrune)
-                {
-                    _nextMemberPrune = Time.unscaledTime + 5f;
-                    PruneStaleMembers();
-                }
-                return;
             }
-
-            SendClientRequest("HELLO|" + _localPeerToken + "|" + EncodeName(GetLocalPlayerName()));
         }
 
         private void EnsureHostMember()
@@ -497,7 +466,6 @@ namespace OnTogetherSchoolScreen
                 _moddedPlayers.Add(HostMemberKey, member);
             }
             member.Name = GetLocalPlayerName();
-            member.LastSeen = Time.unscaledTime;
             member.PeerToken = _localPeerToken;
             _peerPlayerKeys[_localPeerToken] = HostMemberKey;
         }
@@ -516,27 +484,14 @@ namespace OnTogetherSchoolScreen
                 _peerLastSeen.Remove(expired[i]);
                 _peerSkipVotes.Remove(expired[i]);
                 string playerKey;
-                if (_peerPlayerKeys.TryGetValue(expired[i], out playerKey)) _peerPlayerKeys.Remove(expired[i]);
+                if (_peerPlayerKeys.TryGetValue(expired[i], out playerKey))
+                {
+                    _peerPlayerKeys.Remove(expired[i]);
+                    if (!_peerPlayerKeys.ContainsValue(playerKey)) _moddedPlayers.Remove(playerKey);
+                }
             }
             if (!_peerLastSeen.ContainsKey(_playbackControllerToken))
                 _playbackControllerToken = GetLowestActivePeerToken();
-            BroadcastVoteStatus();
-        }
-
-        private void PruneStaleMembers()
-        {
-            var expired = new List<string>();
-            foreach (KeyValuePair<string, LobbyMember> entry in _moddedPlayers)
-            {
-                if (entry.Key != HostMemberKey && Time.unscaledTime - entry.Value.LastSeen > 35f)
-                    expired.Add(entry.Key);
-            }
-            if (expired.Count == 0) return;
-            for (int i = 0; i < expired.Count; i++)
-            {
-                _moddedPlayers.Remove(expired[i]);
-                _skipVotes.Remove(expired[i]);
-            }
             BroadcastVoteStatus();
         }
 
@@ -955,7 +910,6 @@ namespace OnTogetherSchoolScreen
             if (command == "CLEAR")
             {
                 if (!_host) return;
-                _skipVotes.Clear();
                 _localVotedSkip = false;
                 SendBoardCommand("CLEAR");
                 BroadcastVoteStatus();
@@ -1045,7 +999,6 @@ namespace OnTogetherSchoolScreen
         {
             if (!_host && !IsLocalPlaybackCoordinator()) return;
             _queueStartRequested = false;
-            _skipVotes.Clear();
             _localVotedSkip = false;
             if (_videoQueue.Count > 0)
             {
@@ -1073,86 +1026,6 @@ namespace OnTogetherSchoolScreen
             if (!_host || index < 0 || index >= _videoQueue.Count) return;
             _videoQueue.RemoveAt(index);
             BroadcastQueueSnapshot();
-        }
-
-        private void ProcessLobbyRequest(string playerKey, string payload)
-        {
-            if (!_host || string.IsNullOrEmpty(playerKey) || string.IsNullOrEmpty(payload)) return;
-            string[] fields = payload.Split('|');
-            if (fields.Length < 2) return;
-            string command = fields[0];
-            string playerName = DecodeName(fields[fields.Length - 1]);
-            bool newPlayer = !_moddedPlayers.ContainsKey(playerKey);
-            LobbyMember member;
-            if (!_moddedPlayers.TryGetValue(playerKey, out member))
-            {
-                member = new LobbyMember();
-                _moddedPlayers[playerKey] = member;
-            }
-            member.Name = playerName;
-            member.LastSeen = Time.unscaledTime;
-
-            if (command == "HELLO")
-            {
-                int peerToken;
-                if (fields.Length >= 3 && int.TryParse(fields[1], out peerToken) && peerToken > 0 && peerToken <= PeerTokenMask)
-                {
-                    member.PeerToken = peerToken;
-                    _peerPlayerKeys[peerToken] = playerKey;
-                    _peerLastSeen[peerToken] = Time.unscaledTime;
-                }
-                if (newPlayer) BroadcastVoteStatus();
-                BroadcastQueueSnapshot();
-                return;
-            }
-
-            if (command == "ADD" && fields.Length >= 3)
-            {
-                if (_blockedQueuePlayers.Contains(playerKey)) return;
-                string id = fields[1];
-                if (!IsVideoId(id) || _videoQueue.Count >= 30) return;
-                string title;
-                _queueTitleCache.TryGetValue(id, out title);
-                _videoQueue.Add(new QueueEntry { VideoId = id, Title = string.IsNullOrWhiteSpace(title) ? id : title, AddedBy = playerName });
-                RequestQueueTitle(id);
-                ScheduleQueueStart();
-                BroadcastQueueSnapshot();
-                if (newPlayer) BroadcastVoteStatus();
-                return;
-            }
-
-            if (command == "VOTE" || command == "UNVOTE")
-            {
-                if (string.IsNullOrEmpty(_videoId)) return;
-                if (command == "VOTE") _skipVotes.Add(playerKey);
-                else _skipVotes.Remove(playerKey);
-                BroadcastVoteStatus();
-                if (_skipVotes.Count >= GetRequiredVotes() && IsLocalPlaybackCoordinator()) SkipCurrentVideo();
-            }
-        }
-
-        private bool SendClientRequest(string payload)
-        {
-            if (_host)
-            {
-                ProcessLobbyRequest(HostMemberKey, payload);
-                return true;
-            }
-            if (!_lobbyRequestsAvailable) return false;
-
-            try
-            {
-                TextChannelManager manager = NetworkSingleton<TextChannelManager>.I;
-                PlayerController localPlayer = manager == null ? null : manager.MainPlayerController;
-                if (localPlayer == null) return false;
-                localPlayer.ReportPlayerRPC(Encoding.Unicode.GetBytes(ModRequestMarker), payload, default(ReportReasons), new byte[0], new byte[0]);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning("Could not send queue or vote request: " + ex.GetBaseException().Message);
-                return false;
-            }
         }
 
         private void BroadcastQueueSnapshot()
@@ -1186,24 +1059,11 @@ namespace OnTogetherSchoolScreen
 
         private void SendBoardPayload(Vector2 uv, Vector2 prevUV, int colIndex)
         {
-            try { _schoolBoard.FillTheBlanksRPC(uv, prevUV, colIndex, false, false); }
+            // Vanilla recipients treat this as a small eraser dab. A negative previous X
+            // prevents stroke interpolation, and erasing ignores the packed color field.
+            var safePrevUv = new Vector2(BoardPacketEnvelope.EncodeFirstGroup(prevUV.x), prevUV.y);
+            try { _schoolBoard.FillTheBlanksRPC(uv, safePrevUv, colIndex, BoardPacketEnvelope.IsErase, BoardPacketEnvelope.IsBigErase); }
             catch (Exception ex) { Logger.LogWarning("Could not send lobby update: " + ex.GetBaseException().Message); }
-        }
-
-        private static string EncodeName(string name)
-        {
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(string.IsNullOrWhiteSpace(name) ? "Player" : name.Trim()));
-        }
-
-        private static string DecodeName(string value)
-        {
-            try
-            {
-                string name = Encoding.UTF8.GetString(Convert.FromBase64String(value ?? ""));
-                if (!string.IsNullOrWhiteSpace(name)) return ShortTitle(name.Trim(), 24);
-            }
-            catch { }
-            return "Player";
         }
 
         private static string ShortTitle(string value, int maxLength)
@@ -1302,8 +1162,7 @@ namespace OnTogetherSchoolScreen
             else localCommand = "SYNC|" + videoId + "|" + ((encodedOperation >> 4) / 10f).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + ((encodedOperation & 8) != 0 ? "2" : "1") + "|" + _localPeerToken;
 
             HandleNetworkCommand(localCommand);
-            try { _schoolBoard.FillTheBlanksRPC(uv, prevUv, thirdGroup, false, false); }
-            catch (Exception ex) { Logger.LogWarning("Could not send board playback command: " + ex.GetBaseException().Message); }
+            SendBoardPayload(uv, prevUv, thirdGroup);
         }
 
         private void HandleNetworkCommand(string message)
@@ -1327,7 +1186,6 @@ namespace OnTogetherSchoolScreen
                 _nextSync = Time.unscaledTime + 10f;
                 _localVotedSkip = false;
                 _peerSkipVotes.Clear();
-                _skipVotes.Clear();
                 OpenBrowserVideo();
                 UpdateLocalVolume(true);
                 BroadcastVoteStatus();
@@ -1360,7 +1218,6 @@ namespace OnTogetherSchoolScreen
                 _playbackSession.Clear();
                 _localVotedSkip = false;
                 _peerSkipVotes.Clear();
-                _skipVotes.Clear();
                 SendHelper("CLEAR");
                 BroadcastVoteStatus();
             }
@@ -1455,7 +1312,7 @@ namespace OnTogetherSchoolScreen
             if (isNewPeer && peerToken != _localPeerToken && _playbackControllerToken == _localPeerToken
                 && !string.IsNullOrEmpty(_videoId) && !_playbackSession.HasEnded)
                 SendBoardCommand("SYNC", _videoId, _videoTime, _playerState);
-            if (isNewPeer && peerToken != _localPeerToken && !_host && _localPeerToken == previousCoordinator && _videoQueue.Count > 0)
+            if (isNewPeer && peerToken != _localPeerToken && (_host || _localPeerToken == previousCoordinator) && _videoQueue.Count > 0)
                 BroadcastQueueSnapshot();
             BroadcastVoteStatus();
         }
@@ -1538,7 +1395,56 @@ namespace OnTogetherSchoolScreen
             }
         }
 
-        private static bool ReceiveBoardCommand(QuadPainterGPU __instance, Vector2 uv, Vector2 prevUV, int colIndex)
+        private bool BindPeerIdentity(int peerToken, PlayerID sender)
+        {
+            // PurrNet preserves the original RPC sender when the server relays a board packet.
+            // The token is only a protocol identifier; access controls use the actual sender.
+            string playerKey = "player:" + sender.ToString();
+            string existingKey;
+            if (_peerPlayerKeys.TryGetValue(peerToken, out existingKey)
+                && !string.Equals(existingKey, playerKey, StringComparison.Ordinal)) return false;
+
+            LobbyMember member;
+            if (!_moddedPlayers.TryGetValue(playerKey, out member))
+            {
+                member = new LobbyMember();
+                _moddedPlayers.Add(playerKey, member);
+            }
+            if (member.PeerToken != 0 && member.PeerToken != peerToken)
+            {
+                // One network player counts once, even if their mod creates a new session token.
+                _peerLastSeen.Remove(member.PeerToken);
+                _peerSkipVotes.Remove(member.PeerToken);
+                _peerPlayerKeys.Remove(member.PeerToken);
+                if (_playbackControllerToken == member.PeerToken) _playbackControllerToken = peerToken;
+            }
+            member.PeerToken = peerToken;
+            member.Name = GetRemotePlayerName(sender);
+            _peerPlayerKeys[peerToken] = playerKey;
+            // HandlePeerPresence must still see a new token as new to send a queue snapshot.
+            return true;
+        }
+
+        private static string GetRemotePlayerName(PlayerID sender)
+        {
+            try
+            {
+                PlayerPanelController panel = NetworkSingleton<PlayerPanelController>.I;
+                if (panel != null && panel.PlayerIDs != null && panel.IDInfos != null)
+                {
+                    int index = panel.PlayerIDs.IndexOf(sender);
+                    if (index >= 0 && index < panel.IDInfos.Count && panel.IDInfos[index].Name != null)
+                    {
+                        string name = Encoding.Unicode.GetString(panel.IDInfos[index].Name).TrimEnd('\0').Trim();
+                        if (!string.IsNullOrWhiteSpace(name)) return ShortTitle(name, 24);
+                    }
+                }
+            }
+            catch { }
+            return "Player " + sender.ToString();
+        }
+
+        private static bool ReceiveBoardCommand(QuadPainterGPU __instance, Vector2 uv, Vector2 prevUV, int colIndex, RPCInfo rpcInfo)
         {
             int peerToken;
             if (!TryDecodeBoardMarker(uv.x, out peerToken)) return true;
@@ -1546,6 +1452,8 @@ namespace OnTogetherSchoolScreen
             if (plugin == null) return false;
             // Local actions are applied explicitly. A relayed echo must not affect a later video.
             if (peerToken == plugin._localPeerToken) return false;
+            if (peerToken > 0 && !plugin.BindPeerIdentity(peerToken, rpcInfo.sender)) return false;
+            prevUV.x = BoardPacketEnvelope.DecodeFirstGroup(prevUV.x);
 
             int encodedOperation = Mathf.RoundToInt(uv.y);
             int packetType = encodedOperation & 15;
@@ -1615,41 +1523,6 @@ namespace OnTogetherSchoolScreen
                     command = "SYNC|" + id + "|" + time.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "|" + state + "|" + peerToken;
                     plugin._networkQueue.Enqueue(command);
                 }
-            }
-            return false;
-        }
-
-        private static void CaptureLobbyRequestSender(RPCInfo info, out string __state)
-        {
-            __state = _activeLobbyRequestSender;
-            _activeLobbyRequestSender = info.sender.ToString();
-        }
-
-        private static void RestoreLobbyRequestSender(string __state)
-        {
-            _activeLobbyRequestSender = __state;
-        }
-
-        private static bool ReceiveLobbyRequest(byte[] reportingName, string steamId, ReportReasons reportReason, byte[] reportExplanation, byte[] reportedName)
-        {
-            bool isModRequest = false;
-            try
-            {
-                isModRequest = reportingName != null && Encoding.Unicode.GetString(reportingName).TrimEnd('\0') == ModRequestMarker;
-            }
-            catch { }
-            if (!isModRequest) return true;
-
-            SchoolScreenPlugin plugin = _instance;
-            if (plugin != null && plugin._host)
-            {
-                try
-                {
-                    string sender = _activeLobbyRequestSender;
-                    if (!string.IsNullOrEmpty(sender)) plugin.ProcessLobbyRequest(sender, steamId);
-                    else plugin.Logger.LogWarning("Ignored a lobby request because the network sender could not be identified.");
-                }
-                catch (Exception ex) { plugin.Logger.LogWarning("Could not process lobby request: " + ex.GetBaseException().Message); }
             }
             return false;
         }
