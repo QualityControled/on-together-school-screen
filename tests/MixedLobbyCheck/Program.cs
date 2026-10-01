@@ -10,6 +10,7 @@ try
     PacketRoundTrips();
     HostlessMixedLobby();
     IdleQueueLateJoin();
+    QuickReconnect();
     PrefixInputChecks();
     DepartureVoteThreshold();
     HostAccessAndReset();
@@ -228,6 +229,37 @@ static void PrefixInputChecks()
         && ((Dictionary<int, string>)receiver.Plugin.Read("_peerPlayerKeys")).Count == 0,
         "Malformed packets queued commands or discovered false modded members.");
     Console.WriteLine("PASS: ordinary drawing and other boards pass through; malformed mod packets are dropped before identity or command state changes.");
+}
+
+static void QuickReconnect()
+{
+    Time.unscaledTime = 0;
+    var hub = new Hub(10);
+    Peer remaining = hub.Add(1, 200), incumbent = hub.Add(2, 100);
+    remaining.Call("BroadcastPeerPresence"); incumbent.Call("BroadcastPeerPresence"); hub.Drain();
+    remaining.Plugin.Write("_url", "AAAAAAAAAAA"); remaining.Call("AddVideoToQueue"); hub.Drain();
+    incumbent.Plugin.Write("_url", "___________"); incumbent.Call("AddVideoToQueue"); hub.Drain();
+    Time.unscaledTime = 1; incumbent.Call("UpdateQueuePlayback"); hub.Drain();
+    Assert(Video(remaining) == "AAAAAAAAAAA" && (int)remaining.Plugin.Read("_playbackControllerToken") == 100,
+        "Quick-reconnect setup did not start incumbent-controlled playback.");
+    hub.Remove(incumbent);
+    Time.unscaledTime = 2;
+    // Same actual game sender returns before the old token's 20-second expiry,
+    // with a new lower token and empty local playback/queue state.
+    Peer returning = hub.Add(2, 50);
+    returning.Call("BroadcastPeerPresence"); hub.Drain();
+    Assert(Video(returning) == "AAAAAAAAAAA" && QueueSize(returning) == 1,
+        "Quickly reconnected sender did not recover current playback and queue.");
+    Assert((int)remaining.Plugin.Read("_playbackControllerToken") == 200
+        && (int)returning.Plugin.Read("_playbackControllerToken") == 200,
+        "An empty reconnecting browser inherited coordination before restoration.");
+    Assert(Count(remaining) == 2 && Count(returning) == 2, "Old reconnect token was counted as a third modded player.");
+    PlaybackSession session = (PlaybackSession)remaining.Plugin.Read("_playbackSession");
+    session.Observe(session.VideoId, session.LoadId, 1); session.Observe(session.VideoId, session.LoadId, 0);
+    remaining.Call("UpdateQueuePlayback"); hub.Drain();
+    Assert(hub.Peers.All(peer => Video(peer) == "___________" && QueueSize(peer) == 0),
+        "Restored reconnect lobby did not advance its remaining queued video.");
+    Console.WriteLine("PASS: same-sender quick reconnect with a new lower token restores playback/queue, counts once, and advances through a remaining coordinator.");
 }
 
 static void DepartureVoteThreshold()

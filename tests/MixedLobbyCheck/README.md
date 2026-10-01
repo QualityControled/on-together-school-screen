@@ -16,6 +16,7 @@ Checks include:
 - Nonhost queueing with an unmodded server, FIFO start/advance, late join playback/queue discovery, and idle coordination when a newcomer has the lowest token.
 - Modded-only electorate and 30% rounding, existing partial votes reaching a late joiner, local vote removal converging after an older queued snapshot, and an already-met lower vote threshold after a departure.
 - Coordinator departure followed by immediate handoff packets before followers run their own periodic prune.
+- A quick reconnect by the same actual game sender with a fresh lower token, preserving current playback, queue, one-member counting, and subsequent automatic advancement.
 - Actual sender identity binding, queue blocks, token-rebinding rejection, host authority independent of token order, host skip, and rejected viewer queue-clear/arbitrary playback packets.
 - Immediate playback/queue sync from a real modded host before a separate host heartbeat, duplicate/gapped queue entries, and disconnection reset when the textual lobby code remains unchanged.
 - Malformed packet rejection before membership/commands mutate, with normal drawing and other boards passing through.

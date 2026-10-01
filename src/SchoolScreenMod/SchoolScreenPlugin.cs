@@ -1541,7 +1541,10 @@ namespace OnTogetherSchoolScreen
                 _peerLastSeen.Remove(member.PeerToken);
                 _peerSkipVotes.Remove(member.PeerToken);
                 _peerPlayerKeys.Remove(member.PeerToken);
-                if (_playbackControllerToken == member.PeerToken) _playbackControllerToken = peerToken;
+                // A reconnecting mod has empty playback state. An existing peer must
+                // coordinate and send its snapshot before the returning player can follow.
+                if (_playbackControllerToken == member.PeerToken) _playbackControllerToken = GetLowestActivePeerToken();
+                if (_moddedHostPeerToken == member.PeerToken) _moddedHostPeerToken = 0;
             }
             member.PeerToken = peerToken;
             member.Name = GetRemotePlayerName(sender);
