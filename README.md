@@ -66,4 +66,4 @@ The browser helper uses Microsoft's WebView2 NuGet package. Players also need th
 
 GitHub: [QualityControled/on-together-school-screen](https://github.com/QualityControled/on-together-school-screen)
 
-No license has been selected yet, so the source is shared for inspection but is not granted an open-source reuse license.
+No license has been selected yet. If the repository is made public, do not assume the source is available for reuse.

@@ -1,7 +1,7 @@
 {
   "name": "OnTogetherSchoolScreen",
   "version_number": "0.1.8",
-  "website_url": "https://github.com/QualityControled/on-together-school-screen",
+  "website_url": "",
   "description": "Watch YouTube on the school whiteboard with hostless shared playback, queueing, skip voting, optional host controls, and local distance-based volume.",
   "dependencies": [
     "BepInEx-BepInExPack-5.4.2305"
