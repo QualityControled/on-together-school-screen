@@ -21,6 +21,8 @@ Windows mod that plays shared YouTube videos on the whiteboard inside the school
 
 ## Install
 
+Download the ZIP from [GitHub Releases](https://github.com/QualityControled/on-together-school-screen/releases/latest).
+
 1. Close On-Together before replacing the mod files.
 2. Install BepInEx for On-Together and the Microsoft Edge WebView2 Runtime.
 3. Extract this package into `BepInEx/plugins/OnTogetherSchoolScreen/`, keeping `OnTogetherSchoolScreen.dll`, `SchoolScreenBrowser.exe`, `www`, and `runtimes` together. When updating, overwrite the existing mod files; do not install a second copy alongside them.
@@ -71,4 +73,4 @@ The browser helper uses Microsoft's WebView2 NuGet package. Players also need th
 
 GitHub: [QualityControled/on-together-school-screen](https://github.com/QualityControled/on-together-school-screen)
 
-No license has been selected yet. If the repository is made public, do not assume the source is available for reuse.
+The source code and build instructions are available here. Packaged Windows downloads are available under [Releases](https://github.com/QualityControled/on-together-school-screen/releases).
