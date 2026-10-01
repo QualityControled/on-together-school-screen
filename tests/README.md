@@ -1,6 +1,6 @@
 # Package checks
 
-These checks run the upstream r2modman installer against actual ZIP contents using a filesystem provider pointed at a fresh test directory. They also launch the installed Windows browser helper and read its named-pipe output. They do not control a manager UI or test Unity or a multiplayer lobby.
+These checks cover package installation, the installed browser helper, compiled transport metadata, and selected mod methods in a simulated mixed lobby. They do not control a manager UI or execute Unity or a real multiplayer connection.
 
 ## Installer regression
 
@@ -54,4 +54,18 @@ This check links the same envelope helper used by the plugin. It checks every 24
 dotnet run --project tests/BoardPacketEnvelopeCheck --configuration Release
 ```
 
-These checks do not test a live lobby. For the 0.1.11 fix, also check with an unmodded host, confirm no kick dialog or paint-color errors appear, add a second modded player after a queue exists, and exercise names, host queue blocking, skip voting, and lobby changes. Vanilla recipients still process each packet as a small eraser dab at a corner of the board.
+## Mixed-lobby regression
+
+This harness extracts complete methods from the current plugin source without changing their bodies, links the actual packet envelope and playback-session helper, and supplies test doubles at the Unity, PurrNet, and browser boundaries. It records source and method hashes. The optional compiled check verifies that the built plugin has one outgoing RPC call site with small-erasure flags and compares the Harmony prefix parameters against the actual game assembly.
+
+```powershell
+.\tests\MixedLobbyCheck\Run.ps1 `
+  -PluginDll .\OnTogetherSchoolScreen-0.1.11\BepInEx\plugins\OnTogetherSchoolScreen.dll `
+  -GameDll 'C:\path\to\OnTogether_Data\Managed\Assembly-CSharp.dll'
+```
+
+Checks include modded viewers with an unmodded host, queue order, late joins, current votes, modded-only vote counts, host moderation, coordinator handoff, lobby reset, malformed packets, and every outgoing packet's eraser envelope. See [harness details](MixedLobbyCheck/README.md). The earlier 0.1.11 source is an expected failing positive control because it contains two sends outside the wrapper.
+
+## Live lobby follow-up
+
+For a full game check, use an unmodded host and two or more modded viewers with the refreshed package. Confirm no kick dialog or paint-color errors appear, add a viewer after a video and queue exist, and exercise playback completion, votes, names, host queue blocking, leaving, and joining another lobby. Repeat with a modded host. Vanilla recipients still process each packet as a small eraser dab at the board's top-right corner; the current wrapper limits it to one drawing cell. The simulations do not replace this live check.

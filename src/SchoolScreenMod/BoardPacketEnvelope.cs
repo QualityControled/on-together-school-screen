@@ -5,8 +5,9 @@ namespace OnTogetherSchoolScreen
     internal static class BoardPacketEnvelope
     {
         // Vanilla boards clamp out-of-range UVs to a corner. Erasing prevents the packed
-        // payload's color index from indexing the palette. The small eraser still clears
-        // up to a 2-by-2 corner of the vanilla board; this transport is not side-effect free.
+        // payload's color index from indexing the palette. SendBoardPayload places the
+        // small eraser at the top-right edge, clearing one corner cell on vanilla boards.
+        // This transport is not side-effect free.
         internal const bool IsErase = true;
         internal const bool IsBigErase = false;
         internal const int MaximumFirstGroup = 0xFFFFFF;

@@ -2,6 +2,11 @@
 
 ## 0.1.11
 
+- Route every presence, queue, vote, and playback packet through the same eraser envelope; fix two outgoing paths that bypassed it in the earlier 0.1.11 package.
+- Confine the vanilla drawing side effect to one top-right corner cell, validate packet fields, and intercept commands only on the school board.
+- Prefer a modded game host as the single playback coordinator; otherwise retain one modded coordinator until they leave. Viewers cannot replace playback or queue snapshots arbitrarily.
+- Transfer the modded roster and existing skip votes to late joiners, reevaluate votes when players expire, and clear lobby state when the game explicitly reports a disconnect.
+- Add mixed-lobby simulations using extracted, unchanged product method bodies and compiled-DLL checks for every outgoing whiteboard RPC and its game signature.
 - Add a bouncing, color-changing DVD-style logo behind the waiting screen's F9 prompt. It stops while a video plays and respects reduced-motion preferences.
 - Remove all player-discovery calls and Harmony hooks involving the game's report-player system, preventing synthetic kick dialogs on hosts without the mod.
 - Discover modded players through whiteboard presence packets and use the RPC's original sender identity for player names and host queue permissions.

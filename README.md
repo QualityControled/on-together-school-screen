@@ -37,7 +37,7 @@ Install through Thunderstore Mod Manager or r2modman. For a local ZIP, use the m
 
 ### Updating from an older version
 
-The GitHub 0.1.11 ZIP was refreshed to include the DVD-style waiting screen. If you downloaded 0.1.11 before that change, download the ZIP again and reinstall it to get the animation; its version number is still 0.1.11.
+The GitHub 0.1.11 ZIP was refreshed with the DVD-style waiting screen and mixed-lobby compatibility fixes. If you downloaded an earlier 0.1.11 ZIP, download it again and replace the previous installation; its version number is still 0.1.11. Everyone using School Screen in the lobby should use the refreshed package.
 
 Version 0.1.11 removes a player-discovery message that older versions sent through the game's report-player system. That message could repeatedly open a **Kick Player?** dialog on a host without the mod. All School Screen users in the lobby should update to 0.1.11; an older client can still cause these dialogs.
 
@@ -47,7 +47,7 @@ If a host already has these dialogs, everyone using an older version should leav
 
 Videos play in queue order. Viewers can add videos, pause or resume playback, and vote to skip. They cannot choose a later queue entry, stop the board, or seek past a video.
 
-When the game host has the mod, they can skip immediately, choose a specific queued video, stop or seek playback, remove queue entries, and block players from adding videos in the Access tab. When the host does not have the mod, modded players coordinate automatic playback, queue updates, and skip votes among themselves. In that case there is no host-side block list; viewers still use queue order and skip voting.
+When the game host has the mod, they can skip immediately, choose a specific queued video, stop or seek playback, remove queue entries, and block players from adding videos in the Access tab. When the host does not have the mod, one modded player coordinates automatic playback, queue updates, and skip votes. Coordination transfers if that player leaves. In that case there is no host-side block list; viewers still use queue order and skip voting. Joining viewers receive the current video, queue, modded-player roster, and existing votes. Players without the mod are excluded from skip-vote counts.
 
 ## Volume behavior
 
@@ -58,7 +58,7 @@ The cutoff is based on distance from the board rather than the school's room bou
 ## Limits
 
 - Everyone watching together should use 0.1.11. It updates the whiteboard packet encoding for compatibility with players without the mod, and older clients can still send the faulty player-discovery requests.
-- Players without the mod see a small corner of the school whiteboard cleared by the mod's messages. The game's drawing system still handles these packets; they do not display videos for players without the mod.
+- Players without the mod still process each message as a small eraser dab, clearing one drawing cell at the school whiteboard's top-right corner. They do not see or hear the mod's videos.
 - The mod and browser helper target Windows only. Each player needs WebView2 Runtime installed.
 - The local WebView2 player targets up to 30 board-image updates per second. Actual smoothness depends on game performance and WebView2 capture speed.
 - YouTube must allow the video to be embedded. Some private, age-restricted, or region-restricted videos may not play.

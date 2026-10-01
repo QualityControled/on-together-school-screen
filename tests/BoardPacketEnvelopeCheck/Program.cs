@@ -32,7 +32,7 @@ try
     }
 
     Console.WriteLine($"PASS: all {BoardPacketEnvelope.MaximumFirstGroup + 1:N0} payload groups round-trip exactly; legacy decoding, no interpolation, small erase flags, and invalid inputs checked ({elapsed.Elapsed.TotalSeconds:F2}s).");
-    Console.WriteLine("LIMITATION: vanilla recipients still erase up to a 2-by-2 corner; this check does not claim an invisible transport.");
+    Console.WriteLine("LIMITATION: erase packets still affect vanilla drawing. MixedLobbyCheck separately checks the outgoing wrapper's one-cell corner placement; this helper check does not verify UV placement or live Unity drawing.");
     return 0;
 }
 catch (Exception ex)
