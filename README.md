@@ -1,5 +1,7 @@
 # On-Together School Screen
 
+**Press F9 to open the menu.**
+
 Windows mod that plays shared YouTube videos on the whiteboard inside the school building.
 
 ## Features
