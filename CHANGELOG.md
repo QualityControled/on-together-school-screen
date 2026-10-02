@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.12
+
+- Clear hover tooltips when the pointer leaves an item, including clipped and scrolled playlist or queue rows.
+- Add the purple Library menu with Now playing, Lobby queue, Playlists, and Access navigation, a live board preview, and volume controls on every tab.
+- Start the mod-manager description with “Press F9 to open the menu.”
+- Add private saved playlists with local storage, direct saved-track queueing, selection, collection covers, and Undo for playlist changes.
+- Add coordinator-enforced queue limits: three pending videos per person and a ten-second addition cooldown by default, configurable by a modded game host.
+- Confirm queue submissions before clearing entered links, retain rejected inputs, stage ownership snapshots, and support bounded selected-track additions with one cooldown.
+- Add queue cards with thumbnails, video titles, available duration, and player attribution.
+- Add a brief visual celebration when the idle DVD logo hits a corner.
+
 ## 0.1.11
 
 - Wait for a spawned board with a network identity and initialized paint data; skip visible scene placeholders, release despawned board references, and retain submitted links while the board is connecting. Prevent unsynchronized local playback when a send fails.

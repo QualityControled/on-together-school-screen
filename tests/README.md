@@ -12,7 +12,7 @@ npm install --prefix tests --ignore-scripts
 node --experimental-vm-modules tests/manager-install.mjs `
   .\work\r2modman-installer `
   .\OnTogetherSchoolScreen-0.1.9.zip `
-  .\OnTogetherSchoolScreen-0.1.11.zip `
+  .\OnTogetherSchoolScreen-0.1.12.zip `
   .\work\manager-check
 ```
 
@@ -42,7 +42,7 @@ The dependency-free .NET check scans the compiled plugin's references, IL string
 
 ```powershell
 dotnet run --project tests/ReportTransportCheck --configuration Release -- `
-  .\OnTogetherSchoolScreen-0.1.11\BepInEx\plugins\OnTogetherSchoolScreen.dll `
+  .\OnTogetherSchoolScreen-0.1.12\BepInEx\plugins\OnTogetherSchoolScreen.dll `
   .\OnTogetherSchoolScreen-0.1.10\BepInEx\plugins\OnTogetherSchoolScreen.dll
 ```
 
@@ -60,7 +60,7 @@ This harness extracts complete methods from the current plugin source without ch
 
 ```powershell
 .\tests\MixedLobbyCheck\Run.ps1 `
-  -PluginDll .\OnTogetherSchoolScreen-0.1.11\BepInEx\plugins\OnTogetherSchoolScreen.dll `
+  -PluginDll .\OnTogetherSchoolScreen-0.1.12\BepInEx\plugins\OnTogetherSchoolScreen.dll `
   -GameDll 'C:\path\to\OnTogether_Data\Managed\Assembly-CSharp.dll'
 ```
 

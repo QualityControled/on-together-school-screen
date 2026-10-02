@@ -12,6 +12,10 @@
     .dvd-disc { position: absolute; top: 64%; height: 6cqw; width: 100%; border-radius: 50%; background: currentColor; }
     .dvd-disc::after { content: ""; position: absolute; left: 40%; top: 33%; width: 20%; height: 34%; border-radius: 50%; background: #10151e; }
     .dvd-video { position: absolute; inset: auto 0 0; font-size: 9cqw; font-weight: 700; line-height: 1; letter-spacing: .52em; padding-left: .52em; text-align: center; }
+    .dvd-celebration { display: none; position: absolute; left: 0; top: 0; width: 0; height: 0; color: #6de4f2; z-index: 1; pointer-events: none; }
+    .dvd-corner-ring { position: absolute; width: 40px; height: 40px; box-sizing: border-box; border: 1px solid currentColor; border-radius: 50%; }
+    .dvd-corner-particle { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+    .dvd-corner-label { position: absolute; padding: 4px 7px; border-radius: 5px; background: rgb(16 21 30 / .9); font-size: clamp(11px, 1.8cqw, 14px); font-weight: 600; line-height: 1.2; white-space: nowrap; }
     .waiting-message { position: relative; z-index: 2; max-width: calc(100% - 32px); box-sizing: border-box; padding: 16px 24px 18px; text-align: center; background: rgb(16 21 30 / .94); border-radius: 12px; pointer-events: none; }
     .waiting-heading { font-size: clamp(22px, 4cqw, 30px); font-weight: 600; line-height: 1.3; letter-spacing: -.02em; color: #f4f1ff; }
     .waiting-prompt { margin-top: 9px; font-size: clamp(13px, 2.4cqw, 18px); line-height: 1.6; color: #c2c8d9; white-space: nowrap; }
@@ -28,6 +32,16 @@
       <div class="dvd-disc"></div>
       <div class="dvd-video">VIDEO</div>
     </div>
+    <div class="dvd-celebration" aria-hidden="true">
+      <div class="dvd-corner-ring"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-particle"></div>
+      <div class="dvd-corner-label">Corner hit!</div>
+    </div>
     <div class="waiting-message">
       <div class="waiting-heading">School screen</div>
       <div class="waiting-prompt">Press <kbd>F9</kbd> to add a video</div>
@@ -42,12 +56,19 @@
     let titleLookupPlayer = null;
     let titleLookupReady = false;
     let activeTitleLookup = null;
+    let activeTitleLookupTitle = '';
+    let activeTitleLookupTitleAt = 0;
     let titleLookupStartedAt = 0;
     const titleLookupQueue = [];
     const titleLookupQueued = new Set();
+    const videoMetadataSent = new Map();
     const pending = [];
     const waiting = document.getElementById('waiting');
     const idleLogo = waiting.querySelector('.dvd-logo');
+    const cornerCelebration = waiting.querySelector('.dvd-celebration');
+    const cornerRing = cornerCelebration.querySelector('.dvd-corner-ring');
+    const cornerParticles = Array.from(cornerCelebration.querySelectorAll('.dvd-corner-particle'));
+    const cornerLabel = cornerCelebration.querySelector('.dvd-corner-label');
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const idleColors = ['#6de4f2', '#af95ff', '#f5d674', '#f68c9f', '#86e4aa'];
     let waitingVisible = true;
@@ -60,6 +81,45 @@
     let idleLastRafTime = 0;
     let idleRaf = null;
     let idleWatchdog = null;
+    let activeCornerCelebration = null;
+
+    function clearCornerCelebration() {
+      activeCornerCelebration = null;
+      cornerCelebration.style.display = 'none';
+    }
+
+    function startCornerCelebration(time) {
+      if (!waitingVisible || reduceMotion.matches) return;
+      const scale = Math.max(.6, Math.min(1.3, waiting.clientWidth / 768));
+      activeCornerCelebration = { time, scale };
+      cornerCelebration.style.color = idleColors[idleColorIndex];
+      cornerCelebration.style.transform = `translate3d(${idleX + idleLogo.offsetWidth / 2}px, ${idleY + idleLogo.offsetHeight / 2}px, 0)`;
+      cornerCelebration.style.display = 'block';
+      // Keep the label inside the board, on the inward side of the logo.
+      const labelX = idleDirectionX > 0 ? 10 : -cornerLabel.offsetWidth - 10;
+      const labelY = idleDirectionY > 0 ? idleLogo.offsetHeight / 2 + 6 : -idleLogo.offsetHeight / 2 - cornerLabel.offsetHeight - 6;
+      cornerLabel.style.transform = `translate3d(${labelX}px, ${labelY}px, 0)`;
+    }
+
+    function advanceCornerCelebration(time) {
+      if (!activeCornerCelebration) return;
+      const progress = Math.max(0, (time - activeCornerCelebration.time) / 1000);
+      if (progress >= 1 || !waitingVisible || reduceMotion.matches) {
+        clearCornerCelebration();
+        return;
+      }
+      const scale = activeCornerCelebration.scale;
+      const expansion = 1 - Math.pow(1 - progress, 3);
+      cornerRing.style.transform = `translate(-50%, -50%) scale(${scale * (.5 + expansion)})`;
+      cornerRing.style.opacity = String(.45 * (1 - progress));
+      cornerParticles.forEach((particle, index) => {
+        const angle = index * Math.PI * 2 / cornerParticles.length;
+        const radius = scale * (8 + 32 * expansion);
+        particle.style.transform = `translate3d(${Math.cos(angle) * radius}px, ${Math.sin(angle) * radius}px, 0) scale(${1 - progress * .5})`;
+        particle.style.opacity = String(.7 * (1 - progress));
+      });
+      cornerLabel.style.opacity = String(Math.min(1, progress * 8, (1 - progress) * 4));
+    }
 
     function positionIdleLogo() {
       const maxX = Math.max(0, waiting.clientWidth - idleLogo.offsetWidth);
@@ -77,16 +137,19 @@
       const scale = waiting.clientWidth / 768;
       idleX += idleDirectionX * 72 * scale * delta;
       idleY += idleDirectionY * 72 * .64 * scale * delta;
-      let bounced = false;
-      if (maxX > 0 && idleX <= 0 && idleDirectionX < 0) { idleX = 0; idleDirectionX = 1; bounced = true; }
-      else if (maxX > 0 && idleX >= maxX && idleDirectionX > 0) { idleX = maxX; idleDirectionX = -1; bounced = true; }
-      if (maxY > 0 && idleY <= 0 && idleDirectionY < 0) { idleY = 0; idleDirectionY = 1; bounced = true; }
-      else if (maxY > 0 && idleY >= maxY && idleDirectionY > 0) { idleY = maxY; idleDirectionY = -1; bounced = true; }
-      if (bounced) {
+      let bouncedX = false;
+      let bouncedY = false;
+      if (maxX > 0 && idleX <= 0 && idleDirectionX < 0) { idleX = 0; idleDirectionX = 1; bouncedX = true; }
+      else if (maxX > 0 && idleX >= maxX && idleDirectionX > 0) { idleX = maxX; idleDirectionX = -1; bouncedX = true; }
+      if (maxY > 0 && idleY <= 0 && idleDirectionY < 0) { idleY = 0; idleDirectionY = 1; bouncedY = true; }
+      else if (maxY > 0 && idleY >= maxY && idleDirectionY > 0) { idleY = maxY; idleDirectionY = -1; bouncedY = true; }
+      if (bouncedX || bouncedY) {
         idleColorIndex = (idleColorIndex + 1) % idleColors.length;
         idleLogo.style.color = idleColors[idleColorIndex];
       }
       positionIdleLogo();
+      if (bouncedX && bouncedY) startCornerCelebration(time);
+      advanceCornerCelebration(time);
     }
 
     function idleFrame(time) {
@@ -103,6 +166,7 @@
       idleRaf = null;
       idleWatchdog = null;
       idlePreviousTime = null;
+      clearCornerCelebration();
     }
 
     function startIdleAnimation() {
@@ -127,6 +191,7 @@
     }
 
     const idleResizeObserver = new ResizeObserver(() => {
+      clearCornerCelebration();
       if (waitingVisible) positionIdleLogo();
     });
     idleResizeObserver.observe(waiting);
@@ -179,6 +244,8 @@
     function startTitleLookup() {
       if (!titleLookupReady || activeTitleLookup || titleLookupQueue.length === 0) return;
       activeTitleLookup = titleLookupQueue.shift();
+      activeTitleLookupTitle = '';
+      activeTitleLookupTitleAt = 0;
       titleLookupStartedAt = Date.now();
       try {
         titleLookupPlayer.cueVideoById(activeTitleLookup);
@@ -195,26 +262,77 @@
         const idMatches = data && (!data.video_id || data.video_id === activeTitleLookup);
         const title = data && data.title ? String(data.title).replace(/[|\r\n]+/g, ' ').trim() : '';
         if (title && idMatches && titleLookupPlayer.getPlayerState() === 5) {
-          finishTitleLookup(title);
-          return;
+          if (title !== activeTitleLookupTitle) {
+            if (!activeTitleLookupTitle) activeTitleLookupTitleAt = Date.now();
+            activeTitleLookupTitle = title;
+            // Preserve the existing title response while duration is still loading.
+            window.chrome.webview.postMessage('TITLE|' + activeTitleLookup + '|' + title.slice(0, 100));
+          }
+          if (isLiveVideoData(data)) {
+            finishTitleLookup(title, 0, true);
+            return;
+          }
+          const cached = videoMetadataSent.get(activeTitleLookup);
+          const duration = cached && cached.seconds > 0 ? cached.seconds
+            : titleLookupPlayer.getDuration ? Number(titleLookupPlayer.getDuration()) : 0;
+          if (Number.isFinite(duration) && duration > 0) {
+            finishTitleLookup(title, duration);
+            return;
+          }
         }
       } catch (_) { }
 
-      if (Date.now() - titleLookupStartedAt >= 12000) finishTitleLookup('');
+      // Some cued videos do not expose duration until playback; keep their titles moving.
+      if ((activeTitleLookupTitleAt && Date.now() - activeTitleLookupTitleAt >= 1000)
+          || Date.now() - titleLookupStartedAt >= 12000) finishTitleLookup('');
       else setTimeout(checkTitleLookup, 250);
     }
 
-    function finishTitleLookup(title) {
+    function isLiveVideoData(data) {
+      return !!data && (data.isLive === true || data.is_live === true || data.isLiveContent === true);
+    }
+
+    function publishVideoMetadata(id, title, duration, isLive = false) {
+      title = String(title || '').replace(/[|\r\n]+/g, ' ').trim().slice(0, 100);
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || !title) return;
+      const seconds = !isLive && Number.isFinite(duration) && duration > 0 ? Math.min(2147483647, Math.round(duration)) : 0;
+      const previous = videoMetadataSent.get(id);
+      // A timed-out lookup must not replace a duration already read by the active player.
+      const resolvedSeconds = isLive ? 0 : seconds || (previous ? previous.seconds : 0);
+      if (previous && previous.title === title && previous.seconds === resolvedSeconds) return;
+      videoMetadataSent.set(id, { title, seconds: resolvedSeconds });
+      while (videoMetadataSent.size > 600) {
+        const evicted = videoMetadataSent.keys().next().value;
+        videoMetadataSent.delete(evicted);
+        titleLookupQueued.delete(evicted);
+      }
+      window.chrome.webview.postMessage('META|' + id + '|' + title + '|' + resolvedSeconds);
+    }
+
+    function finishTitleLookup(title, duration = 0, isLive = false) {
       const id = activeTitleLookup;
       if (!id) return;
+      const resolvedTitle = title || activeTitleLookupTitle;
+      if (resolvedTitle && resolvedTitle !== activeTitleLookupTitle)
+        window.chrome.webview.postMessage('TITLE|' + id + '|' + resolvedTitle.slice(0, 100));
       activeTitleLookup = null;
-      if (title) window.chrome.webview.postMessage('TITLE|' + id + '|' + title.slice(0, 100));
+      activeTitleLookupTitle = '';
+      activeTitleLookupTitleAt = 0;
+      publishVideoMetadata(id, resolvedTitle, duration, isLive);
       setTimeout(startTitleLookup, 150);
     }
 
     window.schoolScreenLookupTitle = function (id) {
       id = String(id || '').trim();
-      if (!/^[A-Za-z0-9_-]{11}$/.test(id) || titleLookupQueued.has(id)) return;
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
+      const cached = videoMetadataSent.get(id);
+      if (cached) {
+        // An explicit request also refreshes a cache entry evicted by the plugin.
+        window.chrome.webview.postMessage('TITLE|' + id + '|' + cached.title);
+        window.chrome.webview.postMessage('META|' + id + '|' + cached.title + '|' + cached.seconds);
+        return;
+      }
+      if (titleLookupQueued.has(id)) return;
       titleLookupQueued.add(id);
       titleLookupQueue.push(id);
       startTitleLookup();
@@ -224,6 +342,9 @@
       titleLookupQueue.length = 0;
       titleLookupQueued.clear();
       activeTitleLookup = null;
+      activeTitleLookupTitle = '';
+      activeTitleLookupTitleAt = 0;
+      videoMetadataSent.clear();
       if (titleLookupPlayer && titleLookupPlayer.stopVideo) titleLookupPlayer.stopVideo();
     };
 
@@ -262,6 +383,16 @@
       if (!videoData || videoData.video_id !== activeVideoId) return;
       const title = videoData && videoData.title ? String(videoData.title).replace(/[|\r\n]+/g, ' ').slice(0, 100) : '';
       window.chrome.webview.postMessage('STATE|' + time.toFixed(1) + '|' + state + '|' + title + '|' + activeVideoId + '|' + activeLoadId);
+      try {
+        const cached = videoMetadataSent.get(activeVideoId);
+        if (isLiveVideoData(videoData)) {
+          publishVideoMetadata(activeVideoId, title, 0, true);
+          return;
+        }
+        const duration = cached && cached.seconds > 0 ? cached.seconds
+          : player.getDuration ? Number(player.getDuration()) : 0;
+        if (Number.isFinite(duration) && duration > 0) publishVideoMetadata(activeVideoId, title, duration);
+      } catch (_) { }
     }
     setInterval(sendState, 1000);
 

@@ -1,4 +1,5 @@
 using BepInEx;
+using BepInEx.Configuration;
 using HarmonyLib;
 using PurrNet;
 using System;
@@ -15,8 +16,8 @@ using UnityEngine;
 
 namespace OnTogetherSchoolScreen
 {
-    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.11")]
-    public sealed class SchoolScreenPlugin : BaseUnityPlugin
+    [BepInPlugin("codex.ontogether.school-screen", "On-Together School Screen", "0.1.12")]
+    public sealed partial class SchoolScreenPlugin : BaseUnityPlugin
     {
         private const float BoardCommandMarker = 2f;
         private const float LegacyBoardCommandMarker = -2f;
@@ -26,6 +27,10 @@ namespace OnTogetherSchoolScreen
         private const float NearBoardDistance = 3f;
         private const float SilentDistance = 18f;
         private const string HostMemberKey = "__local_host__";
+        private const int DefaultQueueLimit = 3;
+        private const int DefaultQueueCooldown = 10;
+        private const float QueueAuthorityWait = 1.5f;
+        private const float QueueElectionConflictWindow = 8f;
         private static SchoolScreenPlugin _instance;
         private readonly ConcurrentQueue<string> _networkQueue = new ConcurrentQueue<string>();
         private readonly ConcurrentQueue<string> _browserQueue = new ConcurrentQueue<string>();
@@ -35,6 +40,12 @@ namespace OnTogetherSchoolScreen
         private readonly Dictionary<int, float> _peerLastSeen = new Dictionary<int, float>();
         private readonly Dictionary<int, string> _peerPlayerKeys = new Dictionary<int, string>();
         private readonly HashSet<long> _processedQueueEvents = new HashSet<long>();
+        private readonly Dictionary<long, int> _queueAdmissionResults = new Dictionary<long, int>();
+        private readonly Queue<long> _queueAdmissionHistory = new Queue<long>();
+        private readonly Dictionary<string, float> _queueLastAcceptedAt = new Dictionary<string, float>(StringComparer.Ordinal);
+        private readonly Dictionary<int, string> _queueOwnerKeys = new Dictionary<int, string>();
+        private readonly Dictionary<int, string> _queueOwnerNames = new Dictionary<int, string>();
+        private readonly Dictionary<long, QueueBatchRequest> _incomingQueueBatches = new Dictionary<long, QueueBatchRequest>();
         private readonly HashSet<long> _processedPlaybackEvents = new HashSet<long>();
         private readonly PlaybackSession _playbackSession = new PlaybackSession();
         private readonly HashSet<string> _queueTitleLookups = new HashSet<string>(StringComparer.Ordinal);
@@ -88,6 +99,16 @@ namespace OnTogetherSchoolScreen
         private Texture2D _badgeTexture;
         private Texture2D _statusTexture;
         private Texture2D _meterBackgroundTexture;
+        private Texture2D _libraryRailTexture;
+        private Texture2D _libraryCardTexture;
+        private GUIStyle _libraryNavStyle;
+        private GUIStyle _librarySelectedNavStyle;
+        private GUIStyle _libraryCardStyle;
+        private GUIStyle _libraryMetaStyle;
+        private GUIStyle _libraryCardTitleStyle;
+        private GUIStyle _libraryRightStyle;
+        private GUIStyle _libraryHeadingStyle;
+        private string _libraryNotice = "";
         private float _videoTime;
         private int _playerState = -1;
         private float _nextSync;
@@ -107,6 +128,27 @@ namespace OnTogetherSchoolScreen
         private int _queueEventSequence;
         private int _playbackControllerToken;
         private int _moddedHostPeerToken;
+        private int _queueCoordinatorToken;
+        private int _announcedQueueCoordinatorToken;
+        private float _queueAuthorityReadyAt;
+        private float _queueAuthoritySince;
+        private float _queueAuthorityObservedAt;
+        private int _queueSnapshotRevision;
+        private List<QueueEntry> _incomingQueueSnapshot;
+        private int _incomingQueueSource;
+        private int _incomingQueueRevision;
+        private int _incomingQueueExpectedCount;
+        private float _incomingQueueStartedAt;
+        private int _pendingQueueSequence;
+        private List<string> _pendingQueueVideoIds;
+        private string _pendingQueueInput;
+        private bool _pendingQueueClearInput;
+        private float _pendingQueueStartedAt;
+        private float _nextQueueRequestRetry;
+        private int _queueLimit = DefaultQueueLimit;
+        private int _queueCooldown = DefaultQueueCooldown;
+        private ConfigEntry<int> _configuredQueueLimit;
+        private ConfigEntry<int> _configuredQueueCooldown;
         private bool _queueStartRequested;
         private float _nextQueueStartAt;
         private int _playerVolume;
@@ -127,12 +169,29 @@ namespace OnTogetherSchoolScreen
             public string VideoId;
             public string Title;
             public string AddedBy;
+            public int OwnerPeerToken;
+            public string OwnerPlayerKey;
+            public int AdmissionSequence;
+        }
+
+        private sealed class QueueBatchRequest
+        {
+            public string[] VideoIds;
+            public float StartedAt;
         }
 
         private void Awake()
         {
             _instance = this;
             _localPeerToken = CreatePeerToken();
+            _queueAuthorityReadyAt = Time.unscaledTime + QueueAuthorityWait;
+            _queueAuthoritySince = Time.unscaledTime;
+            _queueAuthorityObservedAt = Time.unscaledTime;
+            _configuredQueueLimit = Config.Bind("Queue", "MaxPendingPerPlayer", DefaultQueueLimit,
+                new ConfigDescription("Maximum pending videos per player when you host the lobby. The playing video does not count.", new AcceptableValueRange<int>(1, 30)));
+            _configuredQueueCooldown = Config.Bind("Queue", "AddCooldownSeconds", DefaultQueueCooldown,
+                new ConfigDescription("Seconds between accepted queue additions per player when you host the lobby.", new AcceptableValueRange<int>(0, 300)));
+            InitializeSavedPlaylists();
             _harmony = new Harmony("codex.ontogether.school-screen");
             bool boardDisplayPatch = TryPatch(
                 AccessTools.Method(typeof(QuadPainterGPU), "LateUpdate"),
@@ -175,11 +234,14 @@ namespace OnTogetherSchoolScreen
         private void Update()
         {
             if (Input.GetKeyDown(KeyCode.F9)) _panelOpen = !_panelOpen;
+            PumpVideoMetadata();
             UpdateHostState();
             if (_lobbyStateObserved && !_observedLobbyActive) return;
             FindSchoolBoard();
             PumpQueues();
             UpdateLobbyPresence();
+            UpdateQueueCoordination();
+            UpdatePendingQueueRequest();
             UpdateQueuePlayback();
             if (Time.unscaledTime >= _nextVolumeUpdate)
             {
@@ -312,6 +374,7 @@ namespace OnTogetherSchoolScreen
 
         private void HandleBrowserMessage(string message)
         {
+            if (HandleVideoMetadataMessage(message)) return;
             if (message.StartsWith("ERROR|", StringComparison.Ordinal))
             {
                 _status = "WebView2 error: " + message.Substring(6);
@@ -383,7 +446,7 @@ namespace OnTogetherSchoolScreen
 
         private void RequestQueueTitle(string videoId)
         {
-            if (!_pipeConnected || !IsVideoId(videoId) || _queueTitleCache.ContainsKey(videoId)) return;
+            if (!_pipeConnected || !IsVideoId(videoId) || (_queueTitleCache.ContainsKey(videoId) && _videoDurations.ContainsKey(videoId))) return;
             if (_queueTitleLookups.Add(videoId)) SendHelper("LOOKUP\t" + videoId);
         }
 
@@ -456,6 +519,12 @@ namespace OnTogetherSchoolScreen
             _peerLastSeen.Clear();
             _peerPlayerKeys.Clear();
             _processedQueueEvents.Clear();
+            _queueAdmissionResults.Clear();
+            _queueAdmissionHistory.Clear();
+            _queueLastAcceptedAt.Clear();
+            _queueOwnerKeys.Clear();
+            _queueOwnerNames.Clear();
+            _incomingQueueBatches.Clear();
             _processedPlaybackEvents.Clear();
             _moddedPlayers.Clear();
             _blockedQueuePlayers.Clear();
@@ -468,6 +537,16 @@ namespace OnTogetherSchoolScreen
             _queueEventSequence = 0;
             _playbackControllerToken = 0;
             _moddedHostPeerToken = 0;
+            _queueCoordinatorToken = 0;
+            _announcedQueueCoordinatorToken = 0;
+            _queueAuthorityReadyAt = Time.unscaledTime + QueueAuthorityWait;
+            _queueAuthoritySince = Time.unscaledTime;
+            _queueAuthorityObservedAt = Time.unscaledTime;
+            _queueSnapshotRevision = 0;
+            ClearIncomingQueueSnapshot();
+            ClearPendingQueueRequest();
+            _queueLimit = DefaultQueueLimit;
+            _queueCooldown = DefaultQueueCooldown;
             _queueStatus = "";
             _activeTab = 0;
             _queueScroll = Vector2.zero;
@@ -535,6 +614,13 @@ namespace OnTogetherSchoolScreen
             if (!_peerLastSeen.ContainsKey(_playbackControllerToken))
                 _playbackControllerToken = GetLowestActivePeerToken();
             if (!_peerLastSeen.ContainsKey(_moddedHostPeerToken)) _moddedHostPeerToken = 0;
+            if (_queueCoordinatorToken != _localPeerToken && !IsActivePeerToken(_queueCoordinatorToken))
+            {
+                _queueCoordinatorToken = 0;
+                _announcedQueueCoordinatorToken = 0;
+                _queueAuthorityReadyAt = Time.unscaledTime + 0.75f;
+                ClearIncomingQueueSnapshot();
+            }
             BroadcastVoteStatus(true);
             if (!string.IsNullOrEmpty(_videoId) && GetActiveVoteCount() >= GetRequiredVotes() && IsLocalPlaybackCoordinator())
                 SkipCurrentVideo();
@@ -610,6 +696,7 @@ namespace OnTogetherSchoolScreen
             if (!IsBoardNetworkReady(_schoolBoard)) return;
             _peerLastSeen[_localPeerToken] = Time.unscaledTime;
             SendPeerPacket(11, "PEER|" + _localPeerToken);
+            if (IsLocalPlaybackCoordinator()) BroadcastQueueAuthority();
         }
 
         private void SendPeerPacket(int packetType, string localMessage)
@@ -674,195 +761,32 @@ namespace OnTogetherSchoolScreen
             if (!_guiInitialized)
             {
                 CreateGuiStyles();
+                CreateLibraryGuiStyles();
                 _guiInitialized = true;
             }
             if (!_windowPositioned)
             {
-                _windowRect = new Rect(24, 86, 456, 478);
+                _windowRect = new Rect(24, 72, LibraryWindowWidth, LibraryWindowHeight);
                 _windowPositioned = true;
             }
-            _windowRect = GUI.Window(61429, _windowRect, DrawControlPanel, GUIContent.none, _windowStyle);
-        }
-
-        private void DrawControlPanel(int windowId)
-        {
-            const float width = 456;
-            GUI.DrawTexture(new Rect(0, 0, width, 3), _accentTexture);
-            GUI.Label(new Rect(20, 12, 310, 26), "Study screen", _titleStyle);
-            GUI.Label(new Rect(20, 37, 310, 16), "SCHOOL WHITEBOARD  ·  YOUTUBE", _subtitleStyle);
-            GUI.Box(new Rect(344, 18, 72, 24), _host ? "HOST" : "VIEWER", _host ? _hostBadgeStyle : _viewerBadgeStyle);
-            if (GUI.Button(new Rect(422, 17, 22, 24), "X", _closeButtonStyle)) _panelOpen = false;
-
-            GUI.DrawTexture(new Rect(18, 61, 420, 1), _badgeTexture);
-            const float tabGap = 6f;
-            float tabWidth = (416f - tabGap * 2f) / 3f;
-            if (GUI.Button(new Rect(20, 69, tabWidth, 27), "SCREEN", _activeTab == 0 ? _primaryButtonStyle : _controlButtonStyle)) _activeTab = 0;
-            if (GUI.Button(new Rect(20 + tabWidth + tabGap, 69, tabWidth, 27), "QUEUE", _activeTab == 1 ? _primaryButtonStyle : _controlButtonStyle)) _activeTab = 1;
-            if (GUI.Button(new Rect(20 + (tabWidth + tabGap) * 2, 69, tabWidth, 27), "ACCESS", _activeTab == 2 ? _primaryButtonStyle : _controlButtonStyle)) _activeTab = 2;
-
-            if (_activeTab == 0) DrawScreenTab();
-            else if (_activeTab == 1) DrawQueueTab();
-            else DrawAccessTab();
-            GUI.DragWindow(new Rect(0, 0, 336, 60));
-        }
-
-        private void DrawScreenTab()
-        {
-            bool isError = _status.StartsWith("WebView2 error", StringComparison.Ordinal) || _status.StartsWith("Could not start", StringComparison.Ordinal);
-            string statusText = isError ? _status
-                : !IsBoardNetworkReady(_schoolBoard) ? "Connecting to school whiteboard…"
-                : !_pipeConnected ? "Starting video player…"
-                : string.IsNullOrEmpty(_videoId) ? "Ready to play a video"
-                : string.IsNullOrWhiteSpace(_videoTitle) ? "Loading video title…"
-                : "Now playing · " + ShortTitle(_videoTitle, 45);
-            GUI.DrawTexture(new Rect(21, 111, 8, 8), isError ? _statusTexture : (_pipeConnected ? _accentTexture : _buttonHoverTexture));
-            GUI.Label(new Rect(37, 102, 400, 25), statusText, _statusStyle);
-
-            GUI.Label(new Rect(20, 132, 420, 18), "YOUTUBE VIDEO", _sectionStyle);
-            Rect inputRect = new Rect(20, 153, 416, 36);
-            _url = GUI.TextField(inputRect, _url, _inputStyle);
-            if (string.IsNullOrEmpty(_url)) GUI.Label(new Rect(inputRect.x + 10, inputRect.y + 8, inputRect.width - 20, 20), "Paste a YouTube link or video ID", _placeholderStyle);
-
-            bool boardHasVideo = !string.IsNullOrEmpty(_videoId) || _videoQueue.Count > 0;
-            bool previousEnabled = GUI.enabled;
-            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard);
-            if (GUI.Button(new Rect(20, 197, 416, 38), boardHasVideo ? "ADD TO QUEUE" : "PLAY ON THE BOARD", _primaryButtonStyle))
-            {
-                if (boardHasVideo)
-                {
-                    AddVideoToQueue();
-                    _activeTab = 1;
-                }
-                else ShareVideo();
-            }
-
-            GUI.Label(new Rect(20, 243, 416, 16), "PLAYBACK", _sectionStyle);
-            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard) && !string.IsNullOrEmpty(_videoId);
-            const float gap = 6;
-            float controlWidth = (416 - 2 * gap) / 3;
-            if (GUI.Button(new Rect(20, 262, controlWidth, 33), "Play", _controlButtonStyle)) Control("PLAY");
-            if (GUI.Button(new Rect(20 + controlWidth + gap, 262, controlWidth, 33), "Pause", _controlButtonStyle)) Control("PAUSE");
-            GUI.enabled = _host && !string.IsNullOrEmpty(_videoId);
-            if (GUI.Button(new Rect(20 + 2 * (controlWidth + gap), 262, controlWidth, 33), "Stop", _controlButtonStyle)) Control("CLEAR");
-            if (GUI.Button(new Rect(20, 302, (416 - gap) / 2, 30), "−15 sec", _seekButtonStyle)) Seek(-15);
-            if (GUI.Button(new Rect(20 + (416 + gap) / 2, 302, (416 - gap) / 2, 30), "+15 sec", _seekButtonStyle)) Seek(15);
-            GUI.enabled = previousEnabled;
-
-            GUI.DrawTexture(new Rect(18, 343, 420, 1), _badgeTexture);
-            GUI.Label(new Rect(20, 350, 300, 18), "VOLUME", _sectionStyle);
-            GUI.Label(new Rect(326, 350, 110, 18), Mathf.RoundToInt(_maximumVolume) + "%", _hintStyle);
-            float previousVolume = _maximumVolume;
-            _maximumVolume = GUI.HorizontalSlider(new Rect(20, 376, 300, 18), _maximumVolume, 0f, 200f, _volumeSliderStyle, _volumeThumbStyle);
-            if (Mathf.Abs(previousVolume - _maximumVolume) > 0.1f) UpdateLocalVolume(true);
-            GUI.Label(new Rect(0, 392, 60, 15), "0%", _hintStyle);
-            GUI.Label(new Rect(140, 392, 60, 15), "100%", _hintStyle);
-            GUI.Label(new Rect(280, 392, 60, 15), "200%", _hintStyle);
-            GUI.DrawTexture(new Rect(20, 409, 300, 9), _meterBackgroundTexture);
-            GUI.DrawTexture(new Rect(20, 409, 300 * (_playerVolume / 100f), 9), _accentTexture);
-            GUI.Label(new Rect(20, 421, 300, 17), _playerVolume == 0 ? "Silent" : "Current volume · " + _playerVolume + "%", _hintStyle);
-            if (GUI.Button(new Rect(340, 372, 96, 42), _muted ? "UNMUTE" : "MUTE", _controlButtonStyle))
-            {
-                _muted = !_muted;
-                UpdateLocalVolume(true);
-            }
-        }
-
-        private void DrawQueueTab()
-        {
-            bool previousEnabled = GUI.enabled;
-            GUI.enabled = previousEnabled && IsBoardNetworkReady(_schoolBoard);
-            GUI.Label(new Rect(20, 103, 416, 20), "ADD A VIDEO TO THE QUEUE", _sectionStyle);
-            Rect inputRect = new Rect(20, 128, 296, 36);
-            _url = GUI.TextField(inputRect, _url, _inputStyle);
-            if (string.IsNullOrEmpty(_url)) GUI.Label(new Rect(inputRect.x + 10, inputRect.y + 8, inputRect.width - 20, 20), "Paste a YouTube link or video ID", _placeholderStyle);
-            if (GUI.Button(new Rect(324, 128, 112, 36), "ADD VIDEO", _primaryButtonStyle)) AddVideoToQueue();
-            GUI.Label(new Rect(20, 169, 416, 18), _queueStatus, _hintStyle);
-
-            GUI.Label(new Rect(20, 196, 210, 18), "UP NEXT  ·  " + _videoQueue.Count, _sectionStyle);
-            if (!string.IsNullOrEmpty(_videoId))
-            {
-                string voteText = _host ? "Host can skip now" : (_voteCount + "/" + _votesRequired + " votes · " + _reportedModCount + " modded players");
-                GUI.Label(new Rect(218, 196, 218, 18), voteText, _hintStyle);
-                if (_host)
-                {
-                    if (GUI.Button(new Rect(20, 219, 196, 34), "SKIP NOW", _primaryButtonStyle)) SkipCurrentVideo();
-                }
-                else
-                {
-                    string voteLabel = _localVotedSkip ? "REMOVE MY VOTE" : "VOTE TO SKIP";
-                    if (GUI.Button(new Rect(20, 219, 196, 34), voteLabel, _controlButtonStyle)) ToggleSkipVote();
-                }
-            }
-            else if (_videoQueue.Count > 0)
-            {
-                if (GUI.Button(new Rect(20, 219, 196, 34), "PLAY NEXT", _primaryButtonStyle)) RequestQueueStart();
-            }
-            else GUI.Label(new Rect(20, 219, 416, 34), "Add a video to start watching.", _hintStyle);
-
-            GUI.DrawTexture(new Rect(18, 262, 420, 1), _badgeTexture);
-            Rect viewRect = new Rect(20, 271, 416, 178);
-            float contentHeight = Mathf.Max(viewRect.height, _videoQueue.Count * 38f);
-            _queueScroll = GUI.BeginScrollView(viewRect, _queueScroll, new Rect(0, 0, viewRect.width - 18, contentHeight));
-            for (int i = 0; i < _videoQueue.Count; i++)
-            {
-                QueueEntry item = _videoQueue[i];
-                float y = i * 38f;
-                string title = string.IsNullOrWhiteSpace(item.Title) ? item.VideoId : item.Title;
-                GUI.Label(new Rect(2, y + 6, _host ? 220 : 391, 24), (i + 1) + ".  " + ShortTitle(title, _host ? 26 : 52), _statusStyle);
-                if (_host)
-                {
-                    if (GUI.Button(new Rect(229, y + 2, 88, 30), "PLAY", _controlButtonStyle)) PlayQueuedVideo(i);
-                    if (GUI.Button(new Rect(323, y + 2, 68, 30), "REMOVE", _seekButtonStyle)) RemoveQueuedVideo(i);
-                }
-            }
-            GUI.EndScrollView();
-            GUI.enabled = previousEnabled;
-            GUI.Label(new Rect(20, 451, 416, 16), _host ? "You can skip any time or play a queued video." : "Videos play in order. Vote to skip the current video.", _hintStyle);
-        }
-
-        private void DrawAccessTab()
-        {
-            if (!_host)
-            {
-                GUI.Label(new Rect(20, 110, 416, 40), "Queue blocking is available when the game host has the mod installed.", _statusStyle);
-                return;
-            }
-
-            GUI.Label(new Rect(20, 105, 416, 20), "QUEUE ACCESS", _sectionStyle);
-            GUI.Label(new Rect(20, 127, 416, 30), "Block players here if they abuse the queue.", _hintStyle);
-            Rect viewRect = new Rect(20, 164, 416, 284);
-            float contentHeight = Mathf.Max(viewRect.height, _moddedPlayers.Count * 42f);
-            _accessScroll = GUI.BeginScrollView(viewRect, _accessScroll, new Rect(0, 0, viewRect.width - 18, contentHeight));
-            var keys = new List<string>(_moddedPlayers.Keys);
-            keys.Sort(StringComparer.Ordinal);
-            for (int i = 0; i < keys.Count; i++)
-            {
-                string key = keys[i];
-                LobbyMember member = _moddedPlayers[key];
-                float y = i * 42f;
-                string name = key == HostMemberKey ? member.Name + " (you)" : member.Name;
-                GUI.Label(new Rect(2, y + 7, 258, 25), name, _statusStyle);
-                if (key != HostMemberKey)
-                {
-                    bool blocked = _blockedQueuePlayers.Contains(key);
-                    if (GUI.Button(new Rect(267, y + 2, 120, 32), blocked ? "ALLOW QUEUE" : "BLOCK QUEUE", blocked ? _seekButtonStyle : _controlButtonStyle))
-                    {
-                        if (blocked) _blockedQueuePlayers.Remove(key);
-                        else _blockedQueuePlayers.Add(key);
-                    }
-                }
-            }
-            GUI.EndScrollView();
+            float scale = Mathf.Min(1f, Mathf.Min(Screen.width / 780f, Screen.height / 660f));
+            scale = Mathf.Max(.1f, scale);
+            Matrix4x4 previousMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(scale, scale, 1f));
+            _windowRect.x = Mathf.Clamp(_windowRect.x, 0, Mathf.Max(0, Screen.width / scale - LibraryWindowWidth));
+            _windowRect.y = Mathf.Clamp(_windowRect.y, 0, Mathf.Max(0, Screen.height / scale - LibraryWindowHeight));
+            try { _windowRect = GUI.Window(61429, _windowRect, DrawLibraryControlPanel, GUIContent.none, _windowStyle); }
+            finally { GUI.matrix = previousMatrix; }
         }
 
         private void CreateGuiStyles()
         {
-            _windowTexture = MakeGuiTexture(new Color32(24, 29, 43, 247));
+            _windowTexture = MakeLibraryRoundedTexture(new Color32(27, 30, 41, 255), false);
             _fieldTexture = MakeGuiTexture(new Color32(16, 20, 31, 255));
             _buttonTexture = MakeGuiTexture(new Color32(39, 47, 65, 255));
             _buttonHoverTexture = MakeGuiTexture(new Color32(54, 64, 86, 255));
-            _accentTexture = MakeGuiTexture(new Color32(133, 119, 255, 255));
-            _accentHoverTexture = MakeGuiTexture(new Color32(153, 141, 255, 255));
+            _accentTexture = MakeGuiTexture(new Color32(163, 148, 255, 255));
+            _accentHoverTexture = MakeGuiTexture(new Color32(183, 171, 255, 255));
             _badgeTexture = MakeGuiTexture(new Color32(54, 64, 85, 255));
             _statusTexture = MakeGuiTexture(new Color32(240, 105, 112, 255));
             _meterBackgroundTexture = MakeGuiTexture(new Color32(10, 13, 21, 255));
@@ -870,7 +794,7 @@ namespace OnTogetherSchoolScreen
             _windowStyle = new GUIStyle(GUI.skin.window)
             {
                 padding = new RectOffset(0, 0, 0, 0),
-                border = new RectOffset(1, 1, 1, 1)
+                border = new RectOffset(9, 9, 9, 9)
             };
             _windowStyle.normal.background = _windowTexture;
             _windowStyle.onNormal.background = _windowTexture;
@@ -990,6 +914,11 @@ namespace OnTogetherSchoolScreen
 
         private void AddVideoToQueue()
         {
+            if (_pendingQueueSequence != 0)
+            {
+                _queueStatus = "Waiting for the queue to confirm your video…";
+                return;
+            }
             string id = ParseVideoId(_url);
             if (string.IsNullOrEmpty(id))
             {
@@ -1002,18 +931,122 @@ namespace OnTogetherSchoolScreen
                 _queueStatus = "Connecting to the school whiteboard. Try again shortly.";
                 return;
             }
-            int sequence = NextQueueEventSequence();
-            int encodedOperation = (sequence << 4) | 10;
-            Vector2 uv = new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation);
-            Vector2 previous = new Vector2(PackVideoIdGroup(id, 0, 4), PackVideoIdGroup(id, 4, 4));
-            if (!SendBoardPayload(uv, previous, PackVideoIdGroup(id, 8, 3)))
+            BeginLocalQueueRequest(new List<string> { id }, true);
+        }
+
+        // Playlist UI can submit selected saved tracks without links or repeated cooldowns.
+        private bool QueueSavedVideos(IEnumerable<string> videoIds)
+        {
+            if (_pendingQueueSequence != 0)
             {
+                _queueStatus = "Waiting for the queue to confirm your videos…";
+                return false;
+            }
+            var selected = new List<string>();
+            if (videoIds != null)
+            {
+                foreach (string id in videoIds)
+                {
+                    if (!IsVideoId(id)) continue;
+                    selected.Add(id);
+                    if (selected.Count == 30) break;
+                }
+            }
+            if (selected.Count == 0)
+            {
+                _queueStatus = "Choose at least one saved video.";
+                return false;
+            }
+            if (!IsBoardNetworkReady(_schoolBoard))
+            {
+                _queueStatus = "Connecting to the school whiteboard. Try again shortly.";
+                return false;
+            }
+            return BeginLocalQueueRequest(selected, false);
+        }
+
+        private bool BeginLocalQueueRequest(List<string> videoIds, bool clearInput)
+        {
+            _pendingQueueSequence = NextQueueEventSequence();
+            _pendingQueueVideoIds = videoIds;
+            _pendingQueueInput = _url;
+            _pendingQueueClearInput = clearInput;
+            _pendingQueueStartedAt = Time.unscaledTime;
+            _nextQueueRequestRetry = Time.unscaledTime + 2f;
+            _queueStatus = "Adding your video…";
+            if (!SendQueueAddRequest())
+            {
+                ClearPendingQueueRequest();
                 _queueStatus = "Could not add the video. Try again shortly.";
+                return false;
+            }
+            return true;
+        }
+
+        private bool SendQueueAddRequest()
+        {
+            if (_pendingQueueSequence == 0 || _pendingQueueVideoIds == null || _pendingQueueVideoIds.Count == 0) return false;
+            // Save the request locally: a synchronous local acknowledgment clears pending state.
+            List<string> ids = _pendingQueueVideoIds;
+            int sequence = _pendingQueueSequence;
+            float marker = EncodeBoardMarker(_localPeerToken);
+            bool batch = ids.Count > 1;
+            if (batch)
+            {
+                if (!SendBoardPayload(new Vector2(marker, 169f), new Vector2(sequence, ids.Count), 0)) return false;
+                BeginQueueBatch(_localPeerToken, sequence, ids.Count);
+            }
+            for (int i = 0; i < ids.Count; i++)
+            {
+                string id = ids[i];
+                Vector2 uv = new Vector2(marker, (sequence << 4) | 10);
+                Vector2 previous = new Vector2(PackVideoIdGroup(id, 0, 4), PackVideoIdGroup(id, 4, 4));
+                if (!SendBoardPayload(uv, previous, PackVideoIdGroup(id, 8, 3) | (i << 18))) return false;
+                if (batch) ReceiveQueueBatchItem(_localPeerToken, sequence, i, id);
+                else ApplyQueueAdd(_localPeerToken, sequence, id);
+            }
+            if (batch)
+            {
+                if (!SendBoardPayload(new Vector2(marker, 185f), new Vector2(sequence, ids.Count), 0)) return false;
+                CompleteQueueBatch(_localPeerToken, sequence, ids.Count);
+            }
+            return true;
+        }
+
+        private void UpdatePendingQueueRequest()
+        {
+            if (_incomingQueueBatches.Count > 0)
+            {
+                var expired = new List<long>();
+                foreach (KeyValuePair<long, QueueBatchRequest> batch in _incomingQueueBatches)
+                    if (Time.unscaledTime - batch.Value.StartedAt >= 8f) expired.Add(batch.Key);
+                for (int i = 0; i < expired.Count; i++) _incomingQueueBatches.Remove(expired[i]);
+            }
+            if (_incomingQueueSnapshot != null && Time.unscaledTime - _incomingQueueStartedAt >= 8f)
+                ClearIncomingQueueSnapshot();
+            if (_pendingQueueSequence == 0) return;
+            if (Time.unscaledTime - _pendingQueueStartedAt >= 12f)
+            {
+                ClearPendingQueueRequest();
+                _queueStatus = "Queue not confirmed. Update all mod users and try again.";
                 return;
             }
-            HandleNetworkCommand("QUEUE_ADD|" + _localPeerToken + "|" + sequence + "|" + id);
-            _queueStatus = "Added to the queue.";
-            _url = "";
+            if (Time.unscaledTime >= _nextQueueRequestRetry && IsBoardNetworkReady(_schoolBoard))
+            {
+                _nextQueueRequestRetry = Time.unscaledTime + 2f;
+                SendQueueAddRequest();
+            }
+        }
+
+        private void ClearPendingQueueRequest()
+        {
+            OnPlaylistQueueAdmission(0);
+            _pendingQueueSequence = 0;
+            _pendingQueueVideoIds = null;
+            _pendingQueueInput = null;
+            _pendingQueueClearInput = false;
+            _pendingQueueStartedAt = 0f;
+            _nextQueueRequestRetry = 0f;
         }
 
         private void ToggleSkipVote()
@@ -1038,10 +1071,58 @@ namespace OnTogetherSchoolScreen
 
         private bool IsLocalPlaybackCoordinator()
         {
-            if (_host) return true;
-            if (IsActivePeerToken(_moddedHostPeerToken)) return _moddedHostPeerToken == _localPeerToken;
-            int coordinator = IsActivePeerToken(_playbackControllerToken) ? _playbackControllerToken : GetLowestActivePeerToken();
-            return coordinator == _localPeerToken;
+            return GetQueueCoordinatorToken() == _localPeerToken;
+        }
+
+        private int GetQueueCoordinatorToken()
+        {
+            if (_host)
+            {
+                if (_queueCoordinatorToken != _localPeerToken)
+                    _queueAuthoritySince = _queueAuthorityObservedAt = Time.unscaledTime;
+                return _queueCoordinatorToken = _localPeerToken;
+            }
+            if (IsActivePeerToken(_moddedHostPeerToken))
+            {
+                if (_queueCoordinatorToken != _moddedHostPeerToken)
+                    _queueAuthoritySince = _queueAuthorityObservedAt = Time.unscaledTime;
+                return _queueCoordinatorToken = _moddedHostPeerToken;
+            }
+            if (IsActivePeerToken(_queueCoordinatorToken)) return _queueCoordinatorToken;
+            if (Time.unscaledTime < _queueAuthorityReadyAt) return 0;
+            _queueCoordinatorToken = IsActivePeerToken(_playbackControllerToken)
+                ? _playbackControllerToken : GetLowestActivePeerToken();
+            _queueAuthoritySince = Time.unscaledTime;
+            _queueAuthorityObservedAt = Time.unscaledTime;
+            return _queueCoordinatorToken;
+        }
+
+        private void UpdateQueueCoordination()
+        {
+            if (!IsBoardNetworkReady(_schoolBoard)) return;
+            int coordinator = GetQueueCoordinatorToken();
+            if (coordinator != _localPeerToken)
+            {
+                _announcedQueueCoordinatorToken = 0;
+                return;
+            }
+            if (_host)
+            {
+                _queueLimit = Math.Max(1, Math.Min(30, _configuredQueueLimit.Value));
+                _queueCooldown = Math.Max(0, Math.Min(300, _configuredQueueCooldown.Value));
+            }
+            if (_announcedQueueCoordinatorToken == coordinator) return;
+            _announcedQueueCoordinatorToken = coordinator;
+            BroadcastQueueSnapshot();
+            BroadcastVoteStatus(true);
+        }
+
+        private void BroadcastQueueAuthority()
+        {
+            if (!IsLocalPlaybackCoordinator() || !IsBoardNetworkReady(_schoolBoard)) return;
+            int ageTenths = Math.Min(0xFFFFFF, Math.Max(0, (int)((Time.unscaledTime - _queueAuthoritySince) * 10f)));
+            SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 137f), new Vector2(ageTenths, 0), 1);
+            SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 105f), new Vector2(_queueLimit, _queueCooldown), 0);
         }
 
         private bool IsActivePeerToken(int peerToken)
@@ -1057,8 +1138,17 @@ namespace OnTogetherSchoolScreen
             if (peerToken <= 0 || peerToken > PeerTokenMask) return false;
             if (_host) return peerToken == _localPeerToken;
             if (IsActivePeerToken(_moddedHostPeerToken)) return peerToken == _moddedHostPeerToken;
-            if (IsActivePeerToken(_playbackControllerToken)) return peerToken == _playbackControllerToken;
-            return _playbackControllerToken == 0 || peerToken == GetLowestActivePeerToken();
+            if (IsActivePeerToken(_queueCoordinatorToken)) return peerToken == _queueCoordinatorToken;
+            if (IsActivePeerToken(_playbackControllerToken))
+            {
+                _queueCoordinatorToken = _playbackControllerToken;
+                _queueAuthoritySince = _queueAuthorityObservedAt = Time.unscaledTime;
+                return peerToken == _queueCoordinatorToken;
+            }
+            // An existing coordinator answers a late join before the newcomer elects itself.
+            _queueCoordinatorToken = peerToken;
+            _queueAuthoritySince = _queueAuthorityObservedAt = Time.unscaledTime;
+            return true;
         }
 
         private bool CanAcceptPlaybackCommand(int peerToken, bool synchronization = false)
@@ -1066,6 +1156,7 @@ namespace OnTogetherSchoolScreen
             if (peerToken <= 0 || peerToken > PeerTokenMask) return false;
             if (_host) return peerToken == _localPeerToken;
             if (IsActivePeerToken(_moddedHostPeerToken)) return peerToken == _moddedHostPeerToken;
+            if (IsActivePeerToken(_queueCoordinatorToken)) return peerToken == _queueCoordinatorToken;
             if (IsActivePeerToken(_playbackControllerToken)) return peerToken == _playbackControllerToken;
             if (_playbackControllerToken != 0) return peerToken == GetLowestActivePeerToken();
             // A newcomer can discover an existing video even when their token is lower.
@@ -1130,17 +1221,118 @@ namespace OnTogetherSchoolScreen
 
         private void BroadcastQueueSnapshot()
         {
-            if (!IsBoardNetworkReady(_schoolBoard)) return;
-            SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 7f), Vector2.zero, 0);
+            if (!IsBoardNetworkReady(_schoolBoard) || !IsLocalPlaybackCoordinator()) return;
+            BroadcastQueueAuthority();
+            int revision = _queueSnapshotRevision = (_queueSnapshotRevision % QueueEventSequenceMask) + 1;
+            float marker = EncodeBoardMarker(_localPeerToken);
+            SendBoardPayload(new Vector2(marker, 153f), new Vector2(revision, _videoQueue.Count), 0);
+            // Legacy viewers understand the clear/items but do not support limits or acknowledgments.
+            SendBoardPayload(new Vector2(marker, 7f), Vector2.zero, 0);
             for (int i = 0; i < _videoQueue.Count; i++)
             {
-                string id = _videoQueue[i].VideoId;
+                QueueEntry item = _videoQueue[i];
+                string id = item.VideoId;
                 int first = PackVideoIdGroup(id, 0, 4);
                 int second = PackVideoIdGroup(id, 4, 4);
                 int third = PackVideoIdGroup(id, 8, 3);
                 int encodedOperation = (i << 4) | 8;
-                SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), encodedOperation), new Vector2(first, second), third);
+                SendBoardPayload(new Vector2(marker, encodedOperation), new Vector2(first, second), third);
+                if (item.OwnerPeerToken <= 0)
+                {
+                    // An old-version queue has no ownership; attribute it to its coordinator.
+                    item.OwnerPeerToken = _localPeerToken;
+                    item.OwnerPlayerKey = GetQueueOwnerKey(_localPeerToken);
+                    item.AddedBy = GetLocalPlayerName();
+                }
+                SendBoardPayload(new Vector2(marker, 73f), new Vector2(item.OwnerPeerToken, i), item.AdmissionSequence);
             }
+            SendBoardPayload(new Vector2(marker, 121f), new Vector2(revision, _videoQueue.Count), 0);
+        }
+
+        private void ClearIncomingQueueSnapshot()
+        {
+            _incomingQueueSnapshot = null;
+            _incomingQueueSource = 0;
+            _incomingQueueRevision = 0;
+            _incomingQueueExpectedCount = 0;
+            _incomingQueueStartedAt = 0f;
+        }
+
+        private void BeginQueueSnapshot(int source, int revision, int count)
+        {
+            if (source == _localPeerToken || revision <= 0 || revision > QueueEventSequenceMask || count < 0 || count > 30
+                || !CanAcceptQueueSnapshot(source)) return;
+            _incomingQueueSnapshot = new List<QueueEntry>(count);
+            _incomingQueueSource = source;
+            _incomingQueueRevision = revision;
+            _incomingQueueExpectedCount = count;
+            _incomingQueueStartedAt = Time.unscaledTime;
+        }
+
+        private void CompleteQueueSnapshot(int source, int revision, int count)
+        {
+            if (!CanAcceptQueueSnapshot(source) || _incomingQueueSnapshot == null || source != _incomingQueueSource
+                || revision != _incomingQueueRevision || count != _incomingQueueExpectedCount || count != _incomingQueueSnapshot.Count) return;
+            for (int i = 0; i < _incomingQueueSnapshot.Count; i++)
+                if (_incomingQueueSnapshot[i].OwnerPeerToken <= 0) return;
+            _videoQueue.Clear();
+            _videoQueue.AddRange(_incomingQueueSnapshot);
+            var admissionCounts = new Dictionary<long, int>();
+            for (int i = 0; i < _videoQueue.Count; i++)
+            {
+                QueueEntry item = _videoQueue[i];
+                long eventKey = ((long)item.OwnerPeerToken << 20) | (uint)item.AdmissionSequence;
+                if (item.AdmissionSequence <= 0 || _queueAdmissionResults.ContainsKey(eventKey)) continue;
+                int countForRequest;
+                admissionCounts.TryGetValue(eventKey, out countForRequest);
+                admissionCounts[eventKey] = countForRequest + 1;
+            }
+            foreach (KeyValuePair<long, int> admission in admissionCounts) RememberQueueAdmission(admission.Key, admission.Value << 4);
+            ClearIncomingQueueSnapshot();
+            RequestTitlesForQueue();
+            if (_videoQueue.Count > 0 && string.IsNullOrEmpty(_videoId)) ScheduleQueueStart();
+        }
+
+        private void ApplyQueueOwner(int source, int ownerToken, int index, int sequence)
+        {
+            if (!CanAcceptQueueSnapshot(source) || ownerToken <= 0 || ownerToken > PeerTokenMask || index < 0 || index >= 30
+                || sequence < 0 || sequence > QueueEventSequenceMask) return;
+            List<QueueEntry> target = _incomingQueueSnapshot != null && _incomingQueueSource == source
+                ? _incomingQueueSnapshot : _videoQueue;
+            if (index >= target.Count) return;
+            QueueEntry item = target[index];
+            item.OwnerPeerToken = ownerToken;
+            item.AdmissionSequence = sequence;
+            item.OwnerPlayerKey = GetQueueOwnerKey(ownerToken);
+            item.AddedBy = GetQueueOwnerName(ownerToken);
+            _queueOwnerKeys[ownerToken] = item.OwnerPlayerKey;
+            _queueOwnerNames[ownerToken] = item.AddedBy;
+        }
+
+        private void ApplyQueueAuthority(int source, int ageTenths)
+        {
+            if (source <= 0 || source > PeerTokenMask || ageTenths < 0 || ageTenths > 0xFFFFFF
+                || (_host && source != _localPeerToken)) return;
+            if (IsActivePeerToken(_moddedHostPeerToken) && source != _moddedHostPeerToken) return;
+            if (IsActivePeerToken(_queueCoordinatorToken) && source != _queueCoordinatorToken
+                && source != _moddedHostPeerToken)
+            {
+                if (Time.unscaledTime - _queueAuthorityObservedAt > QueueElectionConflictWindow) return;
+                float localAge = Mathf.Max(0f, Time.unscaledTime - _queueAuthoritySince);
+                float remoteAge = ageTenths / 10f;
+                // Reconcile simultaneous elections without letting a fresh late join displace an established coordinator.
+                if (!(remoteAge > localAge + 2f || (Math.Abs(remoteAge - localAge) <= 2f && source < _queueCoordinatorToken))) return;
+            }
+            bool hadActiveCoordinator = IsActivePeerToken(_queueCoordinatorToken);
+            if (_queueCoordinatorToken != source)
+            {
+                ClearIncomingQueueSnapshot();
+                if (!hadActiveCoordinator) _queueAuthorityObservedAt = Time.unscaledTime;
+            }
+            _peerLastSeen[source] = Time.unscaledTime;
+            _queueCoordinatorToken = source;
+            _queueAuthoritySince = Time.unscaledTime - ageTenths / 10f;
+            _announcedQueueCoordinatorToken = 0;
         }
 
         private void BroadcastVoteStatus(bool includeSnapshot = false, bool transferIdleState = false)
@@ -1196,7 +1388,9 @@ namespace OnTogetherSchoolScreen
         private static string ShortTitle(string value, int maxLength)
         {
             if (string.IsNullOrEmpty(value) || value.Length <= maxLength) return value ?? "";
-            return value.Substring(0, Math.Max(1, maxLength - 1)) + "…";
+            int length = Math.Max(1, maxLength - 1);
+            if (char.IsHighSurrogate(value[length - 1])) length--;
+            return value.Substring(0, length) + "…";
         }
 
         private void SendHelper(string command)
@@ -1403,14 +1597,29 @@ namespace OnTogetherSchoolScreen
             {
                 int peerToken, sequence;
                 if (int.TryParse(fields[1], out peerToken) && int.TryParse(fields[2], out sequence))
-                    ApplyQueueAdd(peerToken, sequence, fields[3]);
+                {
+                    int index = 0;
+                    if (fields.Length >= 5 && !int.TryParse(fields[4], out index)) return;
+                    long eventKey = ((long)peerToken << 20) | (uint)sequence;
+                    if (_incomingQueueBatches.ContainsKey(eventKey)) ReceiveQueueBatchItem(peerToken, sequence, index, fields[3]);
+                    else if (index == 0) ApplyQueueAdd(peerToken, sequence, fields[3]);
+                }
+            }
+            else if ((command == "QUEUE_BATCH_BEGIN" || command == "QUEUE_BATCH_END") && fields.Length >= 4)
+            {
+                int peerToken, sequence, count;
+                if (!int.TryParse(fields[1], out peerToken) || !int.TryParse(fields[2], out sequence)
+                    || !int.TryParse(fields[3], out count)) return;
+                if (command == "QUEUE_BATCH_BEGIN") BeginQueueBatch(peerToken, sequence, count);
+                else CompleteQueueBatch(peerToken, sequence, count);
             }
             else if (command == "QUEUE_CLEAR")
             {
                 int peerToken;
                 if (fields.Length < 2 || !int.TryParse(fields[1], out peerToken)
                     || peerToken == _localPeerToken || !CanAcceptQueueSnapshot(peerToken)) return;
-                _videoQueue.Clear();
+                if (_incomingQueueSnapshot != null && _incomingQueueSource == peerToken) _incomingQueueSnapshot.Clear();
+                else _videoQueue.Clear();
             }
             else if (command == "QUEUE_ITEM" && fields.Length >= 3)
             {
@@ -1422,13 +1631,50 @@ namespace OnTogetherSchoolScreen
                 string title;
                 _queueTitleCache.TryGetValue(fields[2], out title);
                 QueueEntry item = new QueueEntry { VideoId = fields[2], Title = string.IsNullOrWhiteSpace(title) ? fields[2] : title, AddedBy = "" };
-                if (index < _videoQueue.Count) _videoQueue[index] = item;
-                else if (index == _videoQueue.Count) _videoQueue.Add(item);
+                List<QueueEntry> target = _incomingQueueSnapshot != null && _incomingQueueSource == peerToken
+                    ? _incomingQueueSnapshot : _videoQueue;
+                if (index < target.Count) target[index] = item;
+                else if (index == target.Count) target.Add(item);
                 else return;
                 RequestQueueTitle(item.VideoId);
                 // A newcomer may become the idle coordinator before the first video starts.
                 // Give an existing-video sync time to arrive before advancing this snapshot.
-                if (string.IsNullOrEmpty(_videoId)) ScheduleQueueStart();
+                if (_incomingQueueSnapshot == null && string.IsNullOrEmpty(_videoId)) ScheduleQueueStart();
+            }
+            else if (command == "QUEUE_AUTHORITY" && fields.Length >= 3)
+            {
+                int source, age;
+                if (int.TryParse(fields[1], out source) && int.TryParse(fields[2], out age)) ApplyQueueAuthority(source, age);
+            }
+            else if ((command == "QUEUE_BEGIN" || command == "QUEUE_END") && fields.Length >= 4)
+            {
+                int source, revision, count;
+                if (!int.TryParse(fields[1], out source) || !int.TryParse(fields[2], out revision)
+                    || !int.TryParse(fields[3], out count)) return;
+                if (command == "QUEUE_BEGIN") BeginQueueSnapshot(source, revision, count);
+                else CompleteQueueSnapshot(source, revision, count);
+            }
+            else if (command == "QUEUE_OWNER" && fields.Length >= 5)
+            {
+                int source, owner, index, sequence;
+                if (int.TryParse(fields[1], out source) && int.TryParse(fields[2], out owner)
+                    && int.TryParse(fields[3], out index) && int.TryParse(fields[4], out sequence)) ApplyQueueOwner(source, owner, index, sequence);
+            }
+            else if (command == "QUEUE_RESULT" && fields.Length >= 5)
+            {
+                int source, requester, sequence, result;
+                if (int.TryParse(fields[1], out source) && int.TryParse(fields[2], out requester)
+                    && int.TryParse(fields[3], out sequence) && int.TryParse(fields[4], out result))
+                    ApplyQueueAdmissionResult(source, requester, sequence, result);
+            }
+            else if (command == "QUEUE_RULES" && fields.Length >= 4)
+            {
+                int source, limit, cooldown;
+                if (!int.TryParse(fields[1], out source) || !CanAcceptQueueSnapshot(source)
+                    || !int.TryParse(fields[2], out limit) || limit < 1 || limit > 30
+                    || !int.TryParse(fields[3], out cooldown) || cooldown < 0 || cooldown > 300) return;
+                _queueLimit = limit;
+                _queueCooldown = cooldown;
             }
             else if (command == "VOTE_RESET" && fields.Length >= 2)
             {
@@ -1463,14 +1709,12 @@ namespace OnTogetherSchoolScreen
         {
             if (peerToken <= 0 || peerToken > PeerTokenMask) return;
             bool isNewPeer = !_peerLastSeen.ContainsKey(peerToken);
-            int previousCoordinator = GetLowestActivePeerToken();
             _peerLastSeen[peerToken] = Time.unscaledTime;
             if (isNewPeer && peerToken != _localPeerToken && IsLocalPlaybackCoordinator()
                 && !string.IsNullOrEmpty(_videoId) && !_playbackSession.HasEnded)
                 SendBoardCommand("SYNC", _videoId, _videoTime, _playerState);
-            bool sendsSnapshot = _host || (!IsActivePeerToken(_moddedHostPeerToken) && (IsActivePeerToken(_playbackControllerToken)
-                ? _playbackControllerToken == _localPeerToken : _localPeerToken == previousCoordinator));
-            if (isNewPeer && peerToken != _localPeerToken && sendsSnapshot && _videoQueue.Count > 0)
+            bool sendsSnapshot = IsLocalPlaybackCoordinator();
+            if (isNewPeer && peerToken != _localPeerToken && sendsSnapshot)
                 BroadcastQueueSnapshot();
             BroadcastVoteStatus(isNewPeer && peerToken != _localPeerToken,
                 isNewPeer && peerToken != _localPeerToken && sendsSnapshot);
@@ -1491,29 +1735,171 @@ namespace OnTogetherSchoolScreen
 
         private void ApplyQueueAdd(int peerToken, int sequence, string videoId)
         {
-            if (peerToken <= 0 || peerToken > PeerTokenMask || sequence <= 0 || sequence > QueueEventSequenceMask || !IsVideoId(videoId)) return;
+            if (!IsVideoId(videoId)) return;
+            ApplyQueueBatchAdd(peerToken, sequence, new[] { videoId });
+        }
+
+        private void BeginQueueBatch(int peerToken, int sequence, int count)
+        {
+            if (peerToken <= 0 || peerToken > PeerTokenMask || sequence <= 0 || sequence > QueueEventSequenceMask
+                || count < 2 || count > 30) return;
             long eventKey = ((long)peerToken << 20) | (uint)sequence;
-            if (!_processedQueueEvents.Add(eventKey)) return;
+            var obsolete = new List<long>();
+            string requesterKey = GetQueueOwnerKey(peerToken);
+            foreach (long key in _incomingQueueBatches.Keys)
+                if (key != eventKey && string.Equals(GetQueueOwnerKey((int)(key >> 20)), requesterKey, StringComparison.Ordinal)) obsolete.Add(key);
+            for (int i = 0; i < obsolete.Count; i++) _incomingQueueBatches.Remove(obsolete[i]);
+            if (!_incomingQueueBatches.ContainsKey(eventKey) && _incomingQueueBatches.Count >= 64) return;
+            _incomingQueueBatches[eventKey] = new QueueBatchRequest { VideoIds = new string[count], StartedAt = Time.unscaledTime };
+        }
+
+        private void ReceiveQueueBatchItem(int peerToken, int sequence, int index, string videoId)
+        {
+            QueueBatchRequest request;
+            long eventKey = ((long)peerToken << 20) | (uint)sequence;
+            if (!_incomingQueueBatches.TryGetValue(eventKey, out request) || index < 0 || index >= request.VideoIds.Length
+                || !IsVideoId(videoId)) return;
+            request.VideoIds[index] = videoId;
+        }
+
+        private void CompleteQueueBatch(int peerToken, int sequence, int count)
+        {
+            QueueBatchRequest request;
+            long eventKey = ((long)peerToken << 20) | (uint)sequence;
+            if (!_incomingQueueBatches.TryGetValue(eventKey, out request) || count != request.VideoIds.Length) return;
+            _incomingQueueBatches.Remove(eventKey);
+            for (int i = 0; i < count; i++) if (!IsVideoId(request.VideoIds[i])) return;
+            ApplyQueueBatchAdd(peerToken, sequence, request.VideoIds);
+        }
+
+        private void ApplyQueueBatchAdd(int peerToken, int sequence, IList<string> videoIds)
+        {
+            if (peerToken <= 0 || peerToken > PeerTokenMask || sequence <= 0 || sequence > QueueEventSequenceMask
+                || videoIds == null || videoIds.Count < 1 || videoIds.Count > 30) return;
+            for (int i = 0; i < videoIds.Count; i++) if (!IsVideoId(videoIds[i])) return;
             _peerLastSeen[peerToken] = Time.unscaledTime;
+            // Requests never mutate a viewer's queue. Only the established coordinator admits them.
+            if (!IsLocalPlaybackCoordinator()) return;
+            if (!_host && Time.unscaledTime - _queueAuthoritySince < QueueAuthorityWait) return;
+            string playerKey = GetQueueOwnerKey(peerToken);
+            if (peerToken != _localPeerToken && !_peerPlayerKeys.ContainsKey(peerToken)) return;
+            long eventKey = ((long)peerToken << 20) | (uint)sequence;
+            int result;
+            if (_queueAdmissionResults.TryGetValue(eventKey, out result))
+            {
+                SendQueueAdmissionResult(peerToken, sequence, result);
+                return;
+            }
+            if (_host && _blockedQueuePlayers.Contains(playerKey)) result = 1;
+            else if (CountPendingQueueEntries(playerKey) >= _queueLimit) result = 2;
+            else
+            {
+                float lastAccepted;
+                float remaining = _queueLastAcceptedAt.TryGetValue(playerKey, out lastAccepted)
+                    ? _queueCooldown - (Time.unscaledTime - lastAccepted) : 0f;
+                result = remaining > 0f ? (Math.Min(300, (int)Math.Ceiling(remaining)) << 4) | 3
+                    : _videoQueue.Count >= 30 ? 4 : 0;
+            }
+            if (result == 0)
+            {
+                int acceptedCount = Math.Min(videoIds.Count, Math.Min(_queueLimit - CountPendingQueueEntries(playerKey), 30 - _videoQueue.Count));
+                result = acceptedCount << 4;
+                for (int i = 0; i < acceptedCount; i++)
+                {
+                    string videoId = videoIds[i];
+                    string title;
+                    _queueTitleCache.TryGetValue(videoId, out title);
+                    _videoQueue.Add(new QueueEntry
+                    {
+                        VideoId = videoId,
+                        Title = string.IsNullOrWhiteSpace(title) ? videoId : title,
+                        OwnerPeerToken = peerToken,
+                        AdmissionSequence = sequence,
+                        OwnerPlayerKey = playerKey,
+                        AddedBy = GetQueueOwnerName(peerToken)
+                    });
+                    RequestQueueTitle(videoId);
+                }
+                _queueLastAcceptedAt[playerKey] = Time.unscaledTime;
+                ScheduleQueueStart();
+            }
+            RememberQueueAdmission(eventKey, result);
+            // A rejection also corrects the optimistic queue held by an older mod viewer.
+            BroadcastQueueSnapshot();
+            SendQueueAdmissionResult(peerToken, sequence, result);
+        }
 
+        private int CountPendingQueueEntries(string playerKey)
+        {
+            int count = 0;
+            for (int i = 0; i < _videoQueue.Count; i++)
+                if (string.Equals(_videoQueue[i].OwnerPlayerKey, playerKey, StringComparison.Ordinal)) count++;
+            return count;
+        }
+
+        private string GetQueueOwnerKey(int peerToken)
+        {
+            if (peerToken == _localPeerToken) return "__local_queue_player__";
             string playerKey;
-            if (_host && _peerPlayerKeys.TryGetValue(peerToken, out playerKey) && _blockedQueuePlayers.Contains(playerKey))
-            {
-                BroadcastQueueSnapshot();
-                return;
-            }
-            if (_videoQueue.Count >= 30)
-            {
-                if (_host) BroadcastQueueSnapshot();
-                return;
-            }
+            if (_peerPlayerKeys.TryGetValue(peerToken, out playerKey)) return playerKey;
+            return _queueOwnerKeys.TryGetValue(peerToken, out playerKey) ? playerKey : "token:" + peerToken;
+        }
 
-            string title;
-            _queueTitleCache.TryGetValue(videoId, out title);
-            _videoQueue.Add(new QueueEntry { VideoId = videoId, Title = string.IsNullOrWhiteSpace(title) ? videoId : title, AddedBy = "" });
-            RequestQueueTitle(videoId);
-            ScheduleQueueStart();
-            if (_host) BroadcastQueueSnapshot();
+        private string GetQueueOwnerName(int peerToken)
+        {
+            if (peerToken == _localPeerToken) return GetLocalPlayerName();
+            string playerKey;
+            LobbyMember member;
+            if (_peerPlayerKeys.TryGetValue(peerToken, out playerKey) && _moddedPlayers.TryGetValue(playerKey, out member)
+                && !string.IsNullOrWhiteSpace(member.Name)) return member.Name;
+            string name;
+            return _queueOwnerNames.TryGetValue(peerToken, out name) ? name : "Player";
+        }
+
+        private void RememberQueueAdmission(long eventKey, int result)
+        {
+            bool existing = _queueAdmissionResults.ContainsKey(eventKey);
+            _queueAdmissionResults[eventKey] = result;
+            if (existing) return;
+            _queueAdmissionHistory.Enqueue(eventKey);
+            while (_queueAdmissionHistory.Count > 1024)
+                _queueAdmissionResults.Remove(_queueAdmissionHistory.Dequeue());
+        }
+
+        private void SendQueueAdmissionResult(int peerToken, int sequence, int result)
+        {
+            if (!IsLocalPlaybackCoordinator()) return;
+            if (!SendBoardPayload(new Vector2(EncodeBoardMarker(_localPeerToken), 89f), new Vector2(peerToken, sequence), result)) return;
+            if (peerToken == _localPeerToken) ApplyQueueAdmissionResult(_localPeerToken, peerToken, sequence, result);
+        }
+
+        private void ApplyQueueAdmissionResult(int source, int requester, int sequence, int result)
+        {
+            if (!CanAcceptQueueSnapshot(source) || requester <= 0 || requester > PeerTokenMask || sequence <= 0
+                || sequence > QueueEventSequenceMask || result < 0) return;
+            int reason = result & 15;
+            int value = result >> 4;
+            if (reason > 4 || (reason == 0 ? value < 1 || value > 30 : reason == 3 ? value < 1 || value > 300 : value != 0)) return;
+            long eventKey = ((long)requester << 20) | (uint)sequence;
+            // Future coordinators retain receipts that they observed in this lobby.
+            RememberQueueAdmission(eventKey, result);
+            if (requester != _localPeerToken || sequence != _pendingQueueSequence) return;
+            if (reason == 0)
+            {
+                if (_pendingQueueClearInput && string.Equals(_url, _pendingQueueInput, StringComparison.Ordinal)) _url = "";
+                int selectedCount = _pendingQueueVideoIds == null ? 1 : _pendingQueueVideoIds.Count;
+                _queueStatus = value < selectedCount ? "Added " + value + " of " + selectedCount + " videos; " + (selectedCount - value) + " skipped (queue limits)."
+                    : value == 1 ? "Added to the queue." : "Added " + value + " videos to the queue.";
+            }
+            else if (reason == 1) _queueStatus = "The host has blocked you from adding videos.";
+            else if (reason == 2) _queueStatus = "You already have " + _queueLimit + " videos waiting. Let one play first.";
+            else if (reason == 3) _queueStatus = "Wait " + Math.Max(1, result >> 4) + " seconds before adding another video.";
+            else if (reason == 4) _queueStatus = "The queue is full. Try again after a video plays.";
+            else return;
+            bool fromLink = _pendingQueueClearInput;
+            if (!fromLink) OnPlaylistQueueAdmission(reason == 0 ? value : 0);
+            ClearPendingQueueRequest();
+            if (fromLink) _activeTab = 1;
         }
 
         private static int PackVideoIdGroup(string videoId, int start, int count)
@@ -1580,10 +1966,21 @@ namespace OnTogetherSchoolScreen
                 // coordinate and send its snapshot before the returning player can follow.
                 if (_playbackControllerToken == member.PeerToken) _playbackControllerToken = GetLowestActivePeerToken();
                 if (_moddedHostPeerToken == member.PeerToken) _moddedHostPeerToken = 0;
+                if (_queueCoordinatorToken == member.PeerToken)
+                {
+                    _queueCoordinatorToken = 0;
+                    _announcedQueueCoordinatorToken = 0;
+                    _queueAuthorityReadyAt = Time.unscaledTime + 0.75f;
+                    ClearIncomingQueueSnapshot();
+                }
             }
             member.PeerToken = peerToken;
             member.Name = GetRemotePlayerName(sender);
             _peerPlayerKeys[peerToken] = playerKey;
+            _queueOwnerKeys[peerToken] = playerKey;
+            _queueOwnerNames[peerToken] = member.Name;
+            RebindQueuedOwner(_videoQueue, peerToken, playerKey, member.Name);
+            if (_incomingQueueSnapshot != null) RebindQueuedOwner(_incomingQueueSnapshot, peerToken, playerKey, member.Name);
             if (IsLobbyHostSender(sender))
             {
                 _moddedHostPeerToken = peerToken;
@@ -1593,6 +1990,24 @@ namespace OnTogetherSchoolScreen
             }
             // New remote viewers stay unannounced until HandlePeerPresence sends their snapshot.
             return true;
+        }
+
+        private void RebindQueuedOwner(List<QueueEntry> entries, int peerToken, string playerKey, string name)
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                QueueEntry item = entries[i];
+                string previousKey;
+                if (item.OwnerPeerToken == peerToken || string.Equals(item.OwnerPlayerKey, playerKey, StringComparison.Ordinal)
+                    || (_queueOwnerKeys.TryGetValue(item.OwnerPeerToken, out previousKey)
+                        && string.Equals(previousKey, playerKey, StringComparison.Ordinal)))
+                {
+                    if (item.OwnerPeerToken != peerToken) item.AdmissionSequence = 0;
+                    item.OwnerPeerToken = peerToken;
+                    item.OwnerPlayerKey = playerKey;
+                    item.AddedBy = name;
+                }
+            }
         }
 
         private static string GetRemotePlayerName(PlayerID sender)
@@ -1643,7 +2058,8 @@ namespace OnTogetherSchoolScreen
             int type = operation & 15;
             int extra = operation >> 4;
             bool emptyGroups = payload.x == 0f && payload.y == 0f;
-            if (type == 1 || type == 10) return extra > 0 && colIndex <= 0x3FFFF;
+            if (type == 1) return extra > 0 && colIndex <= 0x3FFFF;
+            if (type == 10) return extra > 0 && (colIndex >> 18) < 30;
             if (type == 6 || type == 14) return colIndex <= 0x3FFFF;
             if (type == 8) return extra < 30 && colIndex <= 0x3FFFF;
             if (type == 9)
@@ -1651,8 +2067,23 @@ namespace OnTogetherSchoolScreen
                 if (extra == 0) return payload.x >= 1f && payload.y <= payload.x
                     && colIndex == Math.Max(1, (int)Math.Ceiling(payload.x * 0.30));
                 if (extra == 1) return emptyGroups && colIndex == 0;
-                return (extra == 2 || extra == 3) && payload.x >= 1f && payload.x <= PeerTokenMask
+                if (extra == 2 || extra == 3) return payload.x >= 1f && payload.x <= PeerTokenMask
                     && payload.y == 0f && colIndex == 0;
+                if (extra == 4) return payload.x >= 1f && payload.x <= PeerTokenMask && payload.y < 30f && colIndex <= QueueEventSequenceMask;
+                if (extra == 5)
+                {
+                    int reason = colIndex & 15;
+                    int value = colIndex >> 4;
+                    return payload.x >= 1f && payload.x <= PeerTokenMask && payload.y >= 1f && payload.y <= QueueEventSequenceMask
+                        && reason <= 4 && (reason == 0 ? value >= 1 && value <= 30 : reason == 3 ? value >= 1 && value <= 300 : value == 0);
+                }
+                if (extra == 6) return payload.x >= 1f && payload.x <= 30f && payload.y <= 300f && colIndex == 0;
+                if (extra == 7 || extra == 9) return payload.x >= 1f && payload.x <= QueueEventSequenceMask
+                    && payload.y <= 30f && colIndex == 0;
+                if (extra == 8) return payload.y == 0f && colIndex == 1;
+                if (extra == 10 || extra == 11) return payload.x >= 1f && payload.x <= QueueEventSequenceMask
+                    && payload.y >= 2f && payload.y <= 30f && colIndex == 0;
+                return false;
             }
             if (type == 0) return extra <= 1 && emptyGroups && colIndex == 0;
             if (type == 5) return extra > 0 && emptyGroups && colIndex == 0;
@@ -1699,14 +2130,26 @@ namespace OnTogetherSchoolScreen
                 if (subtype == 0)
                     plugin._networkQueue.Enqueue("VOTE_STATUS|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y) + "|" + colIndex + "|" + peerToken);
                 else if (subtype == 1) plugin._networkQueue.Enqueue("VOTE_RESET|" + peerToken);
-                else plugin._networkQueue.Enqueue((subtype == 2 ? "VOTE_ENTRY|" : "PEER_STATE|") + peerToken + "|" + Mathf.RoundToInt(prevUV.x));
+                else if (subtype == 2 || subtype == 3)
+                    plugin._networkQueue.Enqueue((subtype == 2 ? "VOTE_ENTRY|" : "PEER_STATE|") + peerToken + "|" + Mathf.RoundToInt(prevUV.x));
+                else if (subtype == 4)
+                    plugin._networkQueue.Enqueue("QUEUE_OWNER|" + peerToken + "|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y) + "|" + colIndex);
+                else if (subtype == 5)
+                    plugin._networkQueue.Enqueue("QUEUE_RESULT|" + peerToken + "|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y) + "|" + colIndex);
+                else if (subtype == 6)
+                    plugin._networkQueue.Enqueue("QUEUE_RULES|" + peerToken + "|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y));
+                else if (subtype == 7 || subtype == 9)
+                    plugin._networkQueue.Enqueue((subtype == 7 ? "QUEUE_END|" : "QUEUE_BEGIN|") + peerToken + "|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y));
+                else if (subtype == 8) plugin._networkQueue.Enqueue("QUEUE_AUTHORITY|" + peerToken + "|" + Mathf.RoundToInt(prevUV.x));
+                else if (subtype == 10 || subtype == 11)
+                    plugin._networkQueue.Enqueue((subtype == 10 ? "QUEUE_BATCH_BEGIN|" : "QUEUE_BATCH_END|") + peerToken + "|" + Mathf.RoundToInt(prevUV.x) + "|" + Mathf.RoundToInt(prevUV.y));
                 return false;
             }
             if (packetType == 10)
             {
                 int sequence = encodedOperation >> 4;
-                string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex);
-                if (id != null) plugin._networkQueue.Enqueue("QUEUE_ADD|" + peerToken + "|" + sequence + "|" + id);
+                string id = UnpackVideoId(Mathf.RoundToInt(prevUV.x), Mathf.RoundToInt(prevUV.y), colIndex & 0x3FFFF);
+                if (id != null) plugin._networkQueue.Enqueue("QUEUE_ADD|" + peerToken + "|" + sequence + "|" + id + "|" + (colIndex >> 18));
                 return false;
             }
             if (packetType == 11)
@@ -1806,6 +2249,8 @@ namespace OnTogetherSchoolScreen
 
         private void OnDestroy()
         {
+            DisposeVideoMetadata();
+            DisposeLibraryGuiTextures();
             try { _harmony?.UnpatchSelf(); } catch { }
             try { SendHelper("CLOSE"); } catch { }
             try { _pipe?.Dispose(); } catch { }
